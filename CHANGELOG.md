@@ -8,6 +8,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer 
 - `rcu doctor`: one-shot health check of the node and controller sides with a suggested fix for each problem.
 - `rcu tokens` and `rcu revoke <id>` (one controller instead of all), `[auth] token_days` for expiring tokens, `rcu unpair <node>`, `rcu completions <shell>`.
 - `rcu info` warns when a node answers under a different name than it had when paired.
+- Slowloris protection: the server closes connections that do not finish their request headers within 10 s and caps open connections at 256.
+- Windows hardening: opened-file path check (`GetFinalPathNameByHandle`), hardlink check, refusal of alternate data streams, device names (`CON`, `NUL`, `COM1`…), trailing dots/spaces and 8.3 short names; Windows-only tests run on the Windows CI job.
+- Release workflow smoke-tests each binary on its own platform before publishing; weekly `cargo audit`.
 - CI runs on every branch push, with a real node/controller smoke test (`scripts/smoke.sh`, `scripts/smoke.ps1`) on Linux, macOS and Windows runners.
 
 ## [0.3.0]
