@@ -6,7 +6,7 @@ use rcu::server::{self, AppState};
 use rcu::tokens::TokenStore;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 struct Node {
@@ -20,13 +20,12 @@ async fn start_node() -> Node {
     let dir = tempfile::tempdir().unwrap();
     let tokens = TokenStore::new(dir.path().join("tokens.json"));
     let audit_dir = dir.path().join("audit");
-    let state = Arc::new(AppState {
-        policy: Policy::parse("[node]\nname = \"testnode\"\n[capabilities]\nfs_read = true\n")
-            .unwrap(),
-        tokens: Mutex::new(tokens.clone()),
-        pairing: Mutex::new(Pairing::with_code("ABCD1234".into(), Instant::now())),
-        audit: Audit::new(&audit_dir),
-    });
+    let state = Arc::new(AppState::new(
+        Policy::parse("[node]\nname = \"testnode\"\n[capabilities]\nfs_read = true\n").unwrap(),
+        tokens.clone(),
+        Pairing::with_code("ABCD1234".into(), Instant::now()),
+        Audit::new(&audit_dir),
+    ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(server::serve(listener, state));
@@ -144,6 +143,16 @@ async fn unreachable_node_is_network_error() {
         .unwrap_err();
     assert_eq!(e.code, "NETWORK_ERROR");
     assert_eq!(e.exit_code(), 5);
+}
+
+/// 시험이 중간에 실패해도 노드 프로세스를 남기지 않는다.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn rcu(home: &std::path::Path) -> Command {
@@ -300,4 +309,166 @@ fn policy_check_reports_and_rejects() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_exec_read_write_with_terminal_approval() {
+    use std::io::Write;
+    let node_home = tempfile::tempdir().unwrap();
+    let ctl_home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let echo = ["/bin/echo", "/usr/bin/echo"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap();
+
+    std::fs::write(
+        node_home.path().join("policy.toml"),
+        format!(
+            "[node]\nname = \"term\"\n[capabilities]\nexec = true\nfs_read = true\nfs_write = true\n\
+             [fs]\nroots = ['{}']\n[approval]\nhttp_wait_secs = 1\n\
+             [[exec.allow]]\nprogram = '{echo}'\nargs = [\"**\"]\nrisk = \"read\"\n",
+            work.path().display()
+        ),
+    )
+    .unwrap();
+    let mut serve = KillOnDrop(
+        rcu(node_home.path())
+            .args(["serve", "--bind", &addr])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut node_in = serve.0.stdin.take().unwrap();
+    let mut lines = BufReader::new(serve.0.stdout.take().unwrap()).lines();
+    let code = loop {
+        let line = lines.next().expect("serve exited early").unwrap();
+        if let Some(rest) = line.strip_prefix("pairing code (5 min): ") {
+            break rest.trim().to_string();
+        }
+    };
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = rcu(ctl_home.path())
+        .args(["pair", "t", &addr, &code, "--print-token"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let ctl = |args: &[&str], stdin: Option<&'static str>| {
+        let mut cmd = rcu(ctl_home.path());
+        cmd.env("RCU_TOKEN_T", &token)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stdin(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        if let Some(text) = stdin {
+            input.write_all(text.as_bytes()).unwrap();
+        }
+        drop(input);
+        child
+    };
+    let wait_prompt = |lines: &mut dyn Iterator<Item = std::io::Result<String>>| {
+        for line in lines {
+            // 질문 줄: `[approval ID] cap (risk): ...` (답변 확인 줄 `[approval ID] allowed` 와 구분)
+            let line = line.unwrap();
+            if line.starts_with("[approval ") && line.contains("): ") {
+                return;
+            }
+        }
+        panic!("node never asked for approval");
+    };
+    let finish = |child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        )
+    };
+    let file = work.path().join("note.txt");
+    let file = file.to_str().unwrap();
+
+    // write: 노드가 터미널에서 "a" 로 기간 승인
+    let child = ctl(&["write", "t", file], Some("hello"));
+    wait_prompt(&mut lines);
+    node_in.write_all(b"a\n").unwrap();
+    let (code, v) = finish(child);
+    assert_eq!((code, v["bytes"].clone()), (0, serde_json::json!(5)), "{v}");
+
+    // 같은 능력의 두 번째 write 는 묻지 않는다(그랜트)
+    let file2 = work.path().join("two.txt");
+    let (code, _) = finish(ctl(&["write", "t", file2.to_str().unwrap()], Some("2")));
+    assert_eq!(code, 0);
+
+    // read 는 다른 능력이라 한 번 더 묻는다. "y" = 한 번.
+    let child = ctl(&["read", "t", file], None);
+    wait_prompt(&mut lines);
+    node_in.write_all(b"y\n").unwrap();
+    let (code, v) = finish(child);
+    assert_eq!(
+        (code, v["text"].clone()),
+        (0, serde_json::json!("hello")),
+        "{v}"
+    );
+
+    // 덮어쓰기는 항상 묻는다. 1초 안에 답이 없으면 exit 3 + approval_id.
+    let child = ctl(&["write", "t", file, "--overwrite"], Some("HELLO"));
+    wait_prompt(&mut lines);
+    let (code, v) = finish(child);
+    assert_eq!(code, 3, "{v}");
+    assert_eq!(v["error"]["code"], "APPROVAL_PENDING");
+    let id = v["error"]["approval_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        std::fs::read_to_string(file).unwrap(),
+        "hello",
+        "must not change before approval"
+    );
+
+    node_in.write_all(b"y\n").unwrap();
+    let (code, v) = finish(ctl(&["wait", &id, "--node", "t"], None));
+    assert_eq!(
+        (code, v["overwrote"].clone()),
+        (0, serde_json::json!(true)),
+        "{v}"
+    );
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "HELLO");
+    assert_eq!(
+        std::fs::read_to_string(format!("{file}.rcu-bak")).unwrap(),
+        "hello"
+    );
+
+    // exec: 래퍼 없이 인자 그대로
+    let child = ctl(&["exec", "t", "--", echo, "-n", "a b"], None);
+    wait_prompt(&mut lines);
+    node_in.write_all(b"n\n").unwrap();
+    let (code, v) = finish(child);
+    assert_eq!(
+        (code, v["error"]["code"].clone()),
+        (2, serde_json::json!("APPROVAL_DENIED")),
+        "{v}"
+    );
+
+    let (code, v) = finish(ctl(&["exec", "t", "--", "/bin/sh", "-c", "id"], None));
+    assert_eq!(
+        (code, v["error"]["code"].clone()),
+        (2, serde_json::json!("SHELL_DENIED")),
+        "{v}"
+    );
+
+    drop(serve);
 }

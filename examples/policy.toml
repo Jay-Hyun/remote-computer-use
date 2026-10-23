@@ -23,3 +23,16 @@ risk = "read"
 [[exec.allow]]
 program = "/usr/bin/uptime"
 risk = "read"
+
+# 선택: 기본값을 바꾸고 싶을 때만 켠다.
+# [exec]
+# timeout_secs = 30          # 명령 실행 제한(최대 600)
+# max_output_bytes = 65536   # stdout/stderr 각각의 상한
+#
+# [approval]
+# grant_minutes = 60         # "a" 로 승인했을 때 유지 시간
+# http_wait_secs = 60        # 컨트롤러 요청 하나가 승인을 기다리는 시간. 넘기면 exit 3 + approval_id
+#
+# [limits]
+# per_minute = 60            # 토큰당
+# per_day = 2000             # 노드 전체

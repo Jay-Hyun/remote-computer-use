@@ -10,13 +10,15 @@ use std::time::Duration;
 pub struct ClientError {
     pub code: String,
     pub message: String,
+    pub approval_id: Option<String>,
 }
 
 impl ClientError {
-    fn new(code: &str, message: impl Into<String>) -> ClientError {
+    pub fn new(code: &str, message: impl Into<String>) -> ClientError {
         ClientError {
             code: code.to_string(),
             message: message.into(),
+            approval_id: None,
         }
     }
 
@@ -25,7 +27,7 @@ impl ClientError {
         match self.code.as_str() {
             "UNAUTHORIZED" | "PAIR_WRONG" | "PAIR_LOCKED" | "PAIR_EXPIRED" => 4,
             "CAPABILITY_OFF" | "PATH_DENIED" | "COMMAND_DENIED" | "SHELL_DENIED"
-            | "APPROVAL_DENIED" | "ADDRESS_DENIED" => 2,
+            | "APPROVAL_DENIED" | "APPROVAL_TIMEOUT" | "ADDRESS_DENIED" => 2,
             "APPROVAL_PENDING" => 3,
             "NETWORK_ERROR" => 5,
             _ => 1,
@@ -45,6 +47,18 @@ impl std::error::Error for ClientError {}
 struct ErrBody {
     code: String,
     message: String,
+    #[serde(default)]
+    approval_id: Option<String>,
+}
+
+impl From<ErrBody> for ClientError {
+    fn from(body: ErrBody) -> ClientError {
+        ClientError {
+            code: body.code,
+            message: body.message,
+            approval_id: body.approval_id,
+        }
+    }
 }
 
 /// 주소를 풀고, 풀린 주소가 모두 루프백·테일넷인지 확인한다.
@@ -77,14 +91,16 @@ fn agent() -> ureq::Agent {
 
 fn finish(result: Result<ureq::Response, ureq::Error>) -> Result<Value, ClientError> {
     match result {
+        // 202: 노드 사용자의 승인을 기다리는 중. 오류가 아니라 "대기" 신호다.
+        Ok(resp) if resp.status() == 202 => match resp.into_json::<ErrBody>() {
+            Ok(body) => Err(body.into()),
+            Err(_) => Err(ClientError::new("NETWORK_ERROR", "bad response from node")),
+        },
         Ok(resp) => resp
             .into_json()
             .map_err(|_| ClientError::new("NETWORK_ERROR", "bad response from node")),
         Err(ureq::Error::Status(_, resp)) => match resp.into_json::<ErrBody>() {
-            Ok(body) => Err(ClientError {
-                code: body.code,
-                message: body.message,
-            }),
+            Ok(body) => Err(body.into()),
             Err(_) => Err(ClientError::new("INTERNAL", "unexpected error response")),
         },
         Err(ureq::Error::Transport(_)) => {
@@ -107,6 +123,55 @@ pub fn info(addr: &str, token: &str) -> Result<Value, ClientError> {
     finish(
         agent()
             .get(&format!("http://{sock}/v1/info"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call(),
+    )
+}
+
+fn post(addr: &str, token: &str, path: &str, body: Value) -> Result<Value, ClientError> {
+    let sock = resolve(addr)?;
+    finish(
+        agent()
+            .post(&format!("http://{sock}{path}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(body),
+    )
+}
+
+pub fn exec(addr: &str, token: &str, program: &str, args: &[String]) -> Result<Value, ClientError> {
+    post(
+        addr,
+        token,
+        "/v1/exec",
+        json!({ "program": program, "args": args }),
+    )
+}
+
+pub fn fs_read(addr: &str, token: &str, path: &str) -> Result<Value, ClientError> {
+    post(addr, token, "/v1/fs/read", json!({ "path": path }))
+}
+
+pub fn fs_write(
+    addr: &str,
+    token: &str,
+    path: &str,
+    content_b64: &str,
+    overwrite: bool,
+) -> Result<Value, ClientError> {
+    post(
+        addr,
+        token,
+        "/v1/fs/write",
+        json!({ "path": path, "content_b64": content_b64, "overwrite": overwrite }),
+    )
+}
+
+/// 승인 대기 중이던 요청의 결과를 가져온다(최대 60초 기다림).
+pub fn wait(addr: &str, token: &str, approval_id: &str) -> Result<Value, ClientError> {
+    let sock = resolve(addr)?;
+    finish(
+        agent()
+            .get(&format!("http://{sock}/v1/approvals/{approval_id}"))
             .set("Authorization", &format!("Bearer {token}"))
             .call(),
     )

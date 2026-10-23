@@ -1,7 +1,12 @@
+pub mod approval;
 pub mod audit;
 pub mod bind;
 pub mod client;
 pub mod config;
+pub mod exec;
+pub mod fsops;
+pub mod limits;
+pub mod ops;
 pub mod pairing;
 pub mod policy;
 pub mod secret_store;

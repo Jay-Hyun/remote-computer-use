@@ -12,15 +12,21 @@ description: Use when the user wants to inspect or operate another of their PCs 
 1. `command -v rcu` — if missing, tell the user to install it (`cargo install --path <repo>`) and stop. Do not download binaries.
 2. `rcu nodes` — lists registered nodes (`name`, `addr`, `paired`).
 
-## Commands available now (M1)
+## Commands
 
 | Command | Use |
 |---|---|
 | `rcu nodes` | list registered nodes |
 | `rcu info <node>` | node name, OS, version, enabled capabilities |
-| `rcu pair <node> <host:port> <code>` | pair with a node using the code shown on that node's screen |
+| `rcu pair <node> <host:port> <code>` | pair using the code on the node's screen |
+| `rcu exec <node> -- <program> [args...]` | run an allow-listed program (absolute path, no shell) |
+| `rcu read <node> <path>` | read a file (`text` for UTF-8, `content_b64` always) |
+| `rcu write <node> <path> [--overwrite]` | write stdin to a file; `--overwrite` replaces an existing file (backup `.rcu-bak` kept) |
+| `rcu wait <approval_id> --node <node>` | wait up to 60 s for a request that is pending approval |
 
-`exec`, `read`, `write`, `wait` arrive in M2. Do not invent them; if `rcu --help` does not list them, they do not exist yet.
+Run `rcu info <node>` first and only use what its `capabilities` lists. Programs must be given as absolute paths and match the node's allow list; if you do not know what is allowed, ask the user rather than probing.
+
+The node user approves in the node's terminal (`y` once, `a` for a period, `n` deny). Expect to wait: the first request of each kind needs approval, later ones within the grant period do not. Overwrites and destructive commands are asked every time.
 
 ## Output contract
 
@@ -29,11 +35,11 @@ stdout is one JSON object. Failures are `{"error":{"code","message"}}`. Exit cod
 | Exit | Meaning | What to do |
 |---|---|---|
 | 0 | ok | use the result |
-| 2 | denied by node policy (`CAPABILITY_OFF`, `PATH_DENIED`, `COMMAND_DENIED`, `SHELL_DENIED`, `APPROVAL_DENIED`, `ADDRESS_DENIED`) | report to the user. Do **not** retry, rephrase to dodge the policy, or try another route (no `sh -c`, no `..`, no symlinks). Ask them to change `policy.toml` on the node if they want it allowed |
+| 2 | denied by node policy (`CAPABILITY_OFF`, `PATH_DENIED`, `COMMAND_DENIED`, `SHELL_DENIED`, `APPROVAL_DENIED`, `APPROVAL_TIMEOUT`, `ADDRESS_DENIED`) | report to the user. Do **not** retry, rephrase to dodge the policy, or try another route (no `sh -c`, no `..`, no symlinks). Ask them to change `policy.toml` on the node if they want it allowed |
 | 3 | waiting for approval on the node (`approval_id`) | tell the user to approve on the node. Wait with `rcu wait <approval_id>`. Never resend the same request |
 | 4 | auth (`UNAUTHORIZED`, `PAIR_*`) | the token or pairing code is bad. Ask the user; for `PAIR_LOCKED`/`PAIR_EXPIRED` they must press Enter on the node for a new code |
 | 5 | node unreachable | check Tailscale is up on both PCs; do not guess other addresses |
-| 1 | other | show the message |
+| 1 | other (`EXISTS`, `TOO_LARGE`, `RATE_LIMITED`, `EXEC_FAILED`, ...) | show the message. `EXISTS`: the file is already there; only retry with `--overwrite` if the user wants it replaced. `RATE_LIMITED`: slow down |
 
 ## Rules
 

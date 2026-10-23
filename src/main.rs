@@ -1,5 +1,7 @@
 use anyhow::Context;
+use base64::Engine;
 use clap::{Parser, Subcommand};
+use rcu::approval::Decision;
 use rcu::audit::{Audit, RETENTION_DAYS};
 use rcu::client::ClientError;
 use rcu::config::{self, NodeEntry, Nodes};
@@ -9,9 +11,10 @@ use rcu::secret_store::{DefaultStore, SecretStore};
 use rcu::server::{self, AppState};
 use rcu::tokens::TokenStore;
 use serde_json::{json, Value};
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -56,6 +59,28 @@ enum Cmd {
     },
     /// (컨트롤러) 노드 정보를 읽는다.
     Info { name: String },
+    /// (컨트롤러) 노드에서 명령을 실행한다. 예: rcu exec mac -- /usr/bin/git status
+    Exec {
+        node: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// (컨트롤러) 노드의 파일을 읽는다.
+    Read { node: String, path: String },
+    /// (컨트롤러) 노드에 파일을 쓴다. 내용은 표준 입력에서 읽는다.
+    Write {
+        node: String,
+        path: String,
+        /// 이미 있는 파일을 덮어쓴다(노드에서 매번 승인, 백업 `.rcu-bak` 생성).
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// (컨트롤러) 승인 대기 중이던 요청의 결과를 기다린다(최대 60초). 같은 요청을 다시 보내지 말 것.
+    Wait {
+        approval_id: String,
+        #[arg(long)]
+        node: String,
+    },
     /// (컨트롤러) 등록된 노드 목록.
     Nodes,
 }
@@ -65,7 +90,11 @@ fn print(value: Value) {
 }
 
 fn fail(err: &ClientError) -> ! {
-    print(json!({ "error": { "code": err.code, "message": err.message } }));
+    let mut error = json!({ "code": err.code, "message": err.message });
+    if let Some(id) = &err.approval_id {
+        error["approval_id"] = json!(id);
+    }
+    print(json!({ "error": error }));
     std::process::exit(err.exit_code());
 }
 
@@ -82,15 +111,20 @@ fn main() {
             print_token,
         } => pair(&name, &addr, &code, print_token),
         Cmd::Info { name } => info(&name),
+        Cmd::Exec { node, cmd } => exec(&node, &cmd),
+        Cmd::Read { node, path } => read(&node, &path),
+        Cmd::Write {
+            node,
+            path,
+            overwrite,
+        } => write(&node, &path, overwrite),
+        Cmd::Wait { approval_id, node } => wait(&node, &approval_id),
         Cmd::Nodes => nodes(),
     };
     if let Err(e) = result {
         match e.downcast::<ClientError>() {
             Ok(client_err) => fail(&client_err),
-            Err(e) => fail(&ClientError {
-                code: "INTERNAL".into(),
-                message: format!("{e:#}"),
-            }),
+            Err(e) => fail(&ClientError::new("INTERNAL", format!("{e:#}"))),
         }
     }
 }
@@ -112,12 +146,27 @@ fn serve(bind: &str, policy: Option<PathBuf>) -> anyhow::Result<()> {
 
     let pairing = Pairing::new(Instant::now());
     let code = pairing.current_code().unwrap_or_default().to_string();
-    let state = Arc::new(AppState {
+    let grant_minutes = policy.grant_minutes;
+    let state = Arc::new(AppState::new(
         policy,
-        tokens: Mutex::new(TokenStore::new(config::tokens_path()?)),
-        pairing: Mutex::new(pairing),
+        TokenStore::new(config::tokens_path()?),
+        pairing,
         audit,
-    });
+    ));
+    state.gate.set_notifier(Box::new(move |p| {
+        println!(
+            "\n[approval {}] {} ({}): {}",
+            p.id,
+            p.capability,
+            p.risk.as_str(),
+            p.summary
+        );
+        if p.risk.always_needs_approval() {
+            println!("  y = allow once, n = deny (this kind is asked every time)");
+        } else {
+            println!("  y = allow once, a = allow {grant_minutes} min, n = deny");
+        }
+    }));
 
     println!(
         "rcu node \"{}\" listening on {addr}",
@@ -125,16 +174,38 @@ fn serve(bind: &str, policy: Option<PathBuf>) -> anyhow::Result<()> {
     );
     println!("capabilities: {}", state.policy.capabilities().join(", "));
     println!("pairing code (5 min): {code}");
-    println!("press Enter for a new pairing code");
+    println!(
+        "press Enter for a new pairing code; answer y / a / n when a request asks for approval"
+    );
 
     let for_stdin = Arc::clone(&state);
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut line = String::new();
         while matches!(stdin.read_line(&mut line), Ok(n) if n > 0) {
+            let answer = line.trim().to_ascii_lowercase();
             line.clear();
-            let code = for_stdin.pairing.lock().unwrap().refresh(Instant::now());
-            println!("pairing code (5 min): {code}");
+            if for_stdin.gate.waiting().is_empty() {
+                let code = for_stdin.pairing.lock().unwrap().refresh(Instant::now());
+                println!("pairing code (5 min): {code}");
+                continue;
+            }
+            let decision = match answer.as_str() {
+                "y" | "yes" => Decision::Once,
+                "a" | "always" => Decision::Grant,
+                "n" | "no" => Decision::Deny,
+                _ => {
+                    println!("a request is waiting: answer y, a or n");
+                    continue;
+                }
+            };
+            if let Some(info) = for_stdin.gate.resolve(None, decision) {
+                let verdict = match decision {
+                    Decision::Deny => "denied",
+                    _ => "allowed",
+                };
+                println!("[approval {}] {verdict}", info.id);
+            }
         }
     });
 
@@ -185,17 +256,73 @@ fn pair(name: &str, addr: &str, code: &str, print_token: bool) -> anyhow::Result
     Ok(())
 }
 
-fn info(name: &str) -> anyhow::Result<()> {
+/// 등록된 노드의 주소와 보관된 토큰.
+fn node_and_token(name: &str) -> anyhow::Result<(String, String)> {
     let nodes = Nodes::load()?;
-    let node = nodes.get(name).ok_or_else(|| ClientError {
-        code: "UNKNOWN_NODE".into(),
-        message: "node is not registered; run `rcu nodes`".into(),
+    let node = nodes.get(name).ok_or_else(|| {
+        ClientError::new("UNKNOWN_NODE", "node is not registered; run `rcu nodes`")
     })?;
-    let token = DefaultStore.get(name)?.ok_or_else(|| ClientError {
-        code: "UNAUTHORIZED".into(),
-        message: "no token for this node; pair first".into(),
+    let token = DefaultStore.get(name)?.ok_or_else(|| {
+        ClientError::new(
+            "UNAUTHORIZED",
+            format!(
+                "no token for this node; pair first, or set {} from an environment secret",
+                rcu::secret_store::env_var_name(name)
+            ),
+        )
     })?;
-    print(rcu::client::info(&node.addr, &token)?);
+    Ok((node.addr.clone(), token))
+}
+
+fn info(name: &str) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(name)?;
+    print(rcu::client::info(&addr, &token)?);
+    Ok(())
+}
+
+fn exec(node: &str, cmd: &[String]) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    let (program, args) = cmd.split_first().context("no command given")?;
+    print(rcu::client::exec(&addr, &token, program, args)?);
+    Ok(())
+}
+
+fn read(node: &str, path: &str) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    print(with_text(rcu::client::fs_read(&addr, &token, path)?));
+    Ok(())
+}
+
+/// `wait` 결과가 파일 읽기이면 읽기 좋게 `text` 를 덧붙인다(UTF-8 일 때만).
+fn with_text(mut value: Value) -> Value {
+    let text = value["content_b64"]
+        .as_str()
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    if let Some(text) = text {
+        value["text"] = json!(text);
+    }
+    value
+}
+
+fn write(node: &str, path: &str, overwrite: bool) -> anyhow::Result<()> {
+    const MAX_STDIN: u64 = 8 * 1024 * 1024;
+    let (addr, token) = node_and_token(node)?;
+    let mut data = Vec::new();
+    std::io::stdin()
+        .take(MAX_STDIN + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_STDIN {
+        anyhow::bail!("stdin is larger than 8 MiB");
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    print(rcu::client::fs_write(&addr, &token, path, &b64, overwrite)?);
+    Ok(())
+}
+
+fn wait(node: &str, approval_id: &str) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    print(with_text(rcu::client::wait(&addr, &token, approval_id)?));
     Ok(())
 }
 

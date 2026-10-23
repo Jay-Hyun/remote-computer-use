@@ -14,6 +14,15 @@ pub enum Risk {
 }
 
 impl Risk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Risk::Read => "read",
+            Risk::Write => "write",
+            Risk::Destructive => "destructive",
+            Risk::External => "external",
+        }
+    }
+
     /// 그랜트가 있어도 매번 노드 쪽 승인이 필요한 위험도.
     pub fn always_needs_approval(self) -> bool {
         matches!(self, Risk::Destructive | Risk::External)
@@ -78,6 +87,40 @@ struct RawPolicy {
     capabilities: RawCaps,
     fs: RawFs,
     exec: RawExec,
+    limits: RawLimits,
+    approval: RawApproval,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RawLimits {
+    per_minute: u32,
+    per_day: u32,
+}
+
+impl Default for RawLimits {
+    fn default() -> Self {
+        RawLimits {
+            per_minute: 60,
+            per_day: 2000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RawApproval {
+    grant_minutes: u64,
+    http_wait_secs: u64,
+}
+
+impl Default for RawApproval {
+    fn default() -> Self {
+        RawApproval {
+            grant_minutes: 60,
+            http_wait_secs: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -100,6 +143,7 @@ struct RawFs {
     roots: Vec<String>,
     deny: Vec<String>,
     max_read_bytes: u64,
+    max_write_bytes: u64,
 }
 
 impl Default for RawFs {
@@ -108,14 +152,27 @@ impl Default for RawFs {
             roots: Vec::new(),
             deny: Vec::new(),
             max_read_bytes: 1024 * 1024,
+            max_write_bytes: 1024 * 1024,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct RawExec {
     allow: Vec<RawExecAllow>,
+    timeout_secs: u64,
+    max_output_bytes: usize,
+}
+
+impl Default for RawExec {
+    fn default() -> Self {
+        RawExec {
+            allow: Vec::new(),
+            timeout_secs: 30,
+            max_output_bytes: 64 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,6 +197,14 @@ pub struct Policy {
     pub fs_read_enabled: bool,
     pub fs_write_enabled: bool,
     pub max_read_bytes: u64,
+    pub max_write_bytes: u64,
+    pub exec_timeout_secs: u64,
+    pub exec_max_output_bytes: usize,
+    pub rate_per_minute: u32,
+    pub daily_cap: u32,
+    pub grant_minutes: u64,
+    /// 한 HTTP 요청이 승인을 기다리는 시간. 넘기면 202 + approval_id.
+    pub http_wait_secs: u64,
     roots: Vec<PathBuf>,
     deny: GlobSet,
     exec_allow: Vec<ExecAllow>,
@@ -285,6 +350,13 @@ impl Policy {
             fs_read_enabled: raw.capabilities.fs_read,
             fs_write_enabled: raw.capabilities.fs_write,
             max_read_bytes: raw.fs.max_read_bytes,
+            max_write_bytes: raw.fs.max_write_bytes,
+            exec_timeout_secs: raw.exec.timeout_secs.clamp(1, 600),
+            exec_max_output_bytes: raw.exec.max_output_bytes.clamp(1024, 4 * 1024 * 1024),
+            rate_per_minute: raw.limits.per_minute.max(1),
+            daily_cap: raw.limits.per_day.max(1),
+            grant_minutes: raw.approval.grant_minutes.clamp(1, 24 * 60),
+            http_wait_secs: raw.approval.http_wait_secs.clamp(1, 120),
             roots,
             deny: builder.build()?,
             exec_allow,

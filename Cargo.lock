@@ -897,6 +897,7 @@ dependencies = [
  "directories",
  "globset",
  "keyring",
+ "libc",
  "rand",
  "serde",
  "serde_json",
