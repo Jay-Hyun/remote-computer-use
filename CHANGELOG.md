@@ -15,6 +15,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer 
 - Installers: https enforced (`RCU_ALLOW_INSECURE=1` for local testing), `SKILL.md` ships as a checksummed release asset, extraction limited to the binary, script wrapped in `main()`; Windows installer extracts only `rcu.exe` and keeps `%VAR%` PATH entries.
 - Release workflow: only a pushed tag publishes (not a manual run), `release` environment, build provenance attestation, versions of tag / Cargo.toml / plugin.json must agree.
 - systemd unit escapes `%`/`$`, refuses newlines in paths, sets `NoNewPrivileges=yes`.
+- `RCU_PROXY` is parsed strictly (no `user@host`, paths, ports out of range, unbracketed IPv6): `socks5://localhost:80@evil.example` used to send the token to `evil.example`. HTTP redirects are no longer followed.
+- Every executed request writes a `START` audit record first and is refused (`AUDIT_FAILED`) if that fails; the run continues and is logged even if the client disconnects.
+- Terminal approvals are bound to a request id (`y 763eb30c`); a bare `y` works only when exactly one request waits and it has been on screen for 1.5 s. Max 5 pending requests per token and 20 per node (`BUSY`).
+- Revoking tokens (`rcu revoke --all`) drops their grants, denies their waiting requests, and stops requests that were already approved; token store updates are file-locked; token ids are 64-bit.
+- Grants are scoped by risk (a grant for a `read` command does not cover `write` commands).
+- Authentication happens before the request body is read; failed-auth floods are throttled per source (30/min) and logged at most once a second; pairing failures are counted per source so a peer cannot lock the owner out; request/connection timeouts and a concurrency cap.
+- Windows approval dialog is a form with labelled buttons (no more "No = grant" surprise).
+- Secret files are created 0600 / directories 0700 from the start (`config::write_private`, `create_private_dir`), audit log included; the node's `--bind` must be this PC's Tailscale address when it can be determined.
+- Node names are limited to lowercase letters, digits and hyphens so token environment variable names cannot collide.
 
 ### Added
 - `rcu service install|uninstall`: start the node at login (launchd / systemd --user / Windows scheduled task), no sudo.

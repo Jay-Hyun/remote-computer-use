@@ -88,3 +88,39 @@ impl Nodes {
         }
     }
 }
+
+/// 비밀이 들어갈 수 있는 디렉터리: 소유자만 접근(0700). 상위 디렉터리도 같은 권한으로 만든다.
+pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// 소유자만 읽는 파일(0600)을 처음부터 그 권한으로 만든다(만든 뒤 chmod 하는 틈이 없다).
+/// 마지막 구성요소가 심볼릭 링크면 따라가지 않는다.
+pub fn write_private(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(content)
+}

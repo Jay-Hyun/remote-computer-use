@@ -1,7 +1,7 @@
 use anyhow::Context;
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use rcu::approval::Decision;
+use rcu::approval::{parse_terminal_answer, Decision, ResolveError};
 use rcu::audit::{Audit, RETENTION_DAYS};
 use rcu::client::ClientError;
 use rcu::config::{self, NodeEntry, Nodes};
@@ -160,7 +160,7 @@ fn resolve_bind(bind: Option<String>) -> anyhow::Result<SocketAddr> {
     match bind {
         Some(b) => {
             let addr: SocketAddr = b.parse().context("--bind must be ip:port")?;
-            rcu::bind::check_ip(addr.ip())?;
+            rcu::bind::check_bind(addr.ip())?;
             Ok(addr)
         }
         None => match rcu::bind::detect_tailnet_ip() {
@@ -202,7 +202,7 @@ fn service(action: ServiceCmd) -> anyhow::Result<()> {
 fn pair_code() -> anyhow::Result<()> {
     let request = config::pair_request_path()?;
     let answer = config::pairing_code_path()?;
-    std::fs::create_dir_all(config::state_dir()?)?;
+    config::create_private_dir(&config::state_dir()?)?;
     let _ = std::fs::remove_file(&answer);
     std::fs::write(&request, b"")?;
     for _ in 0..40 {
@@ -225,9 +225,12 @@ fn init() -> anyhow::Result<()> {
     let created = !path.exists();
     if created {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            config::create_private_dir(dir)?;
         }
-        std::fs::write(&path, include_str!("../examples/policy.default.toml"))?;
+        config::write_private(
+            &path,
+            include_str!("../examples/policy.default.toml").as_bytes(),
+        )?;
     }
     print(json!({
         "policy": path,
@@ -283,7 +286,11 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         audit,
     ));
     let gate_for_dialog = Arc::clone(&state.gate);
+    // 터미널의 맨 `y` 가 방금 도착한 요청에 잘못 걸리지 않도록 마지막 질문 시각을 기억한다.
+    let last_prompt = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let last_prompt_for_notifier = Arc::clone(&last_prompt);
     state.gate.set_notifier(Box::new(move |p| {
+        *last_prompt_for_notifier.lock().unwrap() = Instant::now();
         if use_dialog {
             let runner: rcu::dialog::Runner = Arc::new(move |info, still_waiting| {
                 rcu::dialog::show(info, grant_minutes, still_waiting)
@@ -310,9 +317,15 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
             p.summary
         );
         if p.risk.always_needs_approval() {
-            println!("  y = allow once, n = deny (this kind is asked every time)");
+            println!(
+                "  answer: `y {0}` = allow once, `n {0}` = deny (this kind is asked every time)",
+                p.id
+            );
         } else {
-            println!("  y = allow once, a = allow {grant_minutes} min, n = deny");
+            println!(
+                "  answer: `y {0}` = allow once, `a {0}` = allow {grant_minutes} min, `n {0}` = deny",
+                p.id
+            );
         }
     }));
 
@@ -331,28 +344,64 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         let stdin = std::io::stdin();
         let mut line = String::new();
         while matches!(stdin.read_line(&mut line), Ok(n) if n > 0) {
-            let answer = line.trim().to_ascii_lowercase();
-            line.clear();
-            if for_stdin.gate.waiting().is_empty() {
+            let text = std::mem::take(&mut line);
+            let waiting = for_stdin.gate.waiting();
+            if waiting.is_empty() {
                 let code = for_stdin.pairing.lock().unwrap().refresh(Instant::now());
                 println!("pairing code (5 min): {code}");
                 continue;
             }
-            let decision = match answer.as_str() {
-                "y" | "yes" => Decision::Once,
-                "a" | "always" => Decision::Grant,
-                "n" | "no" => Decision::Deny,
-                _ => {
-                    println!("a request is waiting: answer y, a or n");
+            let Some(answer) = parse_terminal_answer(&text) else {
+                println!("a request is waiting: answer `y <id>`, `a <id>` or `n <id>`");
+                continue;
+            };
+            let resolved = match &answer.id {
+                Some(prefix) => for_stdin.gate.resolve_prefix(prefix, answer.decision),
+                None if waiting.len() == 1 => {
+                    // 방금 도착한 요청을 읽기도 전에 미리 쳐 둔 답이 승인하는 일을 막는다.
+                    if last_prompt.lock().unwrap().elapsed()
+                        < std::time::Duration::from_millis(1500)
+                    {
+                        println!(
+                            "(ignored: that request just arrived; read it, then answer again)"
+                        );
+                        continue;
+                    }
+                    for_stdin
+                        .gate
+                        .resolve(Some(&waiting[0].id), answer.decision)
+                        .ok_or(ResolveError::NoMatch)
+                }
+                None => {
+                    println!(
+                        "several requests are waiting; answer with an id, e.g. `y {}`:",
+                        waiting[0].id
+                    );
+                    for p in &waiting {
+                        println!(
+                            "  {} {} ({}): {}",
+                            p.id,
+                            p.capability,
+                            p.risk.as_str(),
+                            p.summary
+                        );
+                    }
                     continue;
                 }
             };
-            if let Some(info) = for_stdin.gate.resolve(None, decision) {
-                let verdict = match decision {
-                    Decision::Deny => "denied",
-                    _ => "allowed",
-                };
-                println!("[approval {}] {verdict}", info.id);
+            match resolved {
+                Ok(info) => {
+                    let verdict = if answer.decision == Decision::Deny {
+                        "denied"
+                    } else {
+                        "allowed"
+                    };
+                    println!("[approval {}] {verdict}: {}", info.id, info.summary);
+                }
+                Err(ResolveError::NoMatch) => println!("no waiting request matches that id"),
+                Err(ResolveError::Ambiguous) => {
+                    println!("that id prefix matches several requests; type more of it")
+                }
             }
         }
     });
@@ -368,7 +417,7 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         if request_path.exists() {
             let _ = std::fs::remove_file(&request_path);
             let code = for_requests.pairing.lock().unwrap().refresh(Instant::now());
-            if write_private(&answer_path, &code).is_ok() {
+            if config::write_private(&answer_path, code.as_bytes()).is_ok() {
                 println!("pairing code (5 min): {code}");
             }
         }
@@ -380,16 +429,6 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         server::serve(listener, state).await?;
         anyhow::Ok(())
     })
-}
-
-fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    std::fs::write(path, text)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
 }
 
 fn revoke(all: bool) -> anyhow::Result<()> {
@@ -417,6 +456,13 @@ fn policy_check(path: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 fn pair(name: &str, addr: &str, code: &str, print_token: bool) -> anyhow::Result<()> {
+    if !rcu::secret_store::valid_node_name(name) {
+        return Err(ClientError::new(
+            "BAD_NODE_NAME",
+            "node names are 1-32 characters: lowercase letters, digits and hyphens (e.g. work-mac)",
+        )
+        .into());
+    }
     let resp = rcu::client::pair(addr, code, &controller_label())?;
     let token = resp["token"].as_str().context("node sent no token")?;
     let mut out = json!({ "paired": name, "node": resp["node"] });

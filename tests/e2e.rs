@@ -390,7 +390,8 @@ fn cli_exec_read_write_with_terminal_approval() {
             // 질문 줄: `[approval ID] cap (risk): ...` (답변 확인 줄 `[approval ID] allowed` 와 구분)
             let line = line.unwrap();
             if line.starts_with("[approval ") && line.contains("): ") {
-                return;
+                let rest = &line["[approval ".len()..];
+                return rest[..rest.find(']').unwrap()].to_string();
             }
         }
         panic!("node never asked for approval");
@@ -407,8 +408,8 @@ fn cli_exec_read_write_with_terminal_approval() {
 
     // write: 노드가 터미널에서 "a" 로 기간 승인
     let child = ctl(&["write", "t", file], Some("hello"));
-    wait_prompt(&mut lines);
-    node_in.write_all(b"a\n").unwrap();
+    let pid = wait_prompt(&mut lines);
+    node_in.write_all(format!("a {pid}\n").as_bytes()).unwrap();
     let (code, v) = finish(child);
     assert_eq!((code, v["bytes"].clone()), (0, serde_json::json!(5)), "{v}");
 
@@ -419,8 +420,8 @@ fn cli_exec_read_write_with_terminal_approval() {
 
     // read 는 다른 능력이라 한 번 더 묻는다. "y" = 한 번.
     let child = ctl(&["read", "t", file], None);
-    wait_prompt(&mut lines);
-    node_in.write_all(b"y\n").unwrap();
+    let pid = wait_prompt(&mut lines);
+    node_in.write_all(format!("y {pid}\n").as_bytes()).unwrap();
     let (code, v) = finish(child);
     assert_eq!(
         (code, v["text"].clone()),
@@ -430,7 +431,7 @@ fn cli_exec_read_write_with_terminal_approval() {
 
     // 덮어쓰기는 항상 묻는다. 1초 안에 답이 없으면 exit 3 + approval_id.
     let child = ctl(&["write", "t", file, "--overwrite"], Some("HELLO"));
-    wait_prompt(&mut lines);
+    let overwrite_pid = wait_prompt(&mut lines);
     let (code, v) = finish(child);
     assert_eq!(code, 3, "{v}");
     assert_eq!(v["error"]["code"], "APPROVAL_PENDING");
@@ -441,7 +442,11 @@ fn cli_exec_read_write_with_terminal_approval() {
         "must not change before approval"
     );
 
-    node_in.write_all(b"y\n").unwrap();
+    // 다른 id 로는 승인되지 않는다. 맞는 id 일 때만.
+    node_in.write_all(b"y 00000000\n").unwrap();
+    node_in
+        .write_all(format!("y {overwrite_pid}\n").as_bytes())
+        .unwrap();
     let (code, v) = finish(ctl(&["wait", &id, "--node", "t"], None));
     assert_eq!(
         (code, v["overwrote"].clone()),
@@ -456,8 +461,10 @@ fn cli_exec_read_write_with_terminal_approval() {
 
     // exec: 래퍼 없이 인자 그대로
     let child = ctl(&["exec", "t", "--", echo, "-n", "a b"], None);
-    wait_prompt(&mut lines);
+    let pid = wait_prompt(&mut lines);
+    // 요청이 막 도착했을 때의 맨 `n` 은 무시된다(미리 쳐 둔 답이 읽지 않은 요청에 걸리지 않게).
     node_in.write_all(b"n\n").unwrap();
+    node_in.write_all(format!("n {pid}\n").as_bytes()).unwrap();
     let (code, v) = finish(child);
     assert_eq!(
         (code, v["error"]["code"].clone()),

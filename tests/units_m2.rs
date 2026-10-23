@@ -45,19 +45,19 @@ fn rejected_calls_do_not_consume_the_budget() {
 fn grants_expire_and_are_scoped() {
     let g = Gate::new(Duration::from_secs(60));
     let t0 = Instant::now();
-    assert!(!g.grant_alive("tok", "exec", t0));
-    g.add_grant("tok", "exec", t0);
-    assert!(g.grant_alive("tok", "exec", t0 + Duration::from_secs(59)));
-    assert!(!g.grant_alive("tok", "fs.read", t0));
-    assert!(!g.grant_alive("other", "exec", t0));
-    assert!(!g.grant_alive("tok", "exec", t0 + Duration::from_secs(61)));
+    assert!(!g.grant_alive("tok", "exec", Risk::Read, t0));
+    g.add_grant("tok", "exec", Risk::Read, t0);
+    assert!(g.grant_alive("tok", "exec", Risk::Read, t0 + Duration::from_secs(59)));
+    assert!(!g.grant_alive("tok", "fs.read", Risk::Read, t0));
+    assert!(!g.grant_alive("other", "exec", Risk::Read, t0));
+    assert!(!g.grant_alive("tok", "exec", Risk::Read, t0 + Duration::from_secs(61)));
 }
 
 #[test]
 fn resolve_targets_oldest_or_given_id() {
     let g = Gate::new(Duration::from_secs(60));
-    let a = g.open("t", "exec", Risk::Read, "a".into());
-    let b = g.open("t", "exec", Risk::Read, "b".into());
+    let a = g.open("t", "exec", Risk::Read, "a".into()).unwrap();
+    let b = g.open("t", "exec", Risk::Read, "b".into()).unwrap();
     assert_eq!(g.waiting().len(), 2);
     assert_eq!(g.resolve(Some(&b.id), Decision::Once).unwrap().id, b.id);
     assert_eq!(g.resolve(None, Decision::Deny).unwrap().id, a.id);
@@ -67,7 +67,7 @@ fn resolve_targets_oldest_or_given_id() {
 #[test]
 fn subscribe_requires_the_same_token() {
     let g = Gate::new(Duration::from_secs(60));
-    let o = g.open("owner", "exec", Risk::Read, "x".into());
+    let o = g.open("owner", "exec", Risk::Read, "x".into()).unwrap();
     assert!(g.subscribe(&o.id, "owner").is_some());
     assert!(g.subscribe(&o.id, "thief").is_none());
     assert!(g.subscribe("nope", "owner").is_none());
@@ -82,7 +82,8 @@ fn notifier_is_called_with_the_request() {
     g.set_notifier(Box::new(move |p| {
         s2.lock().unwrap().push(p.summary.clone())
     }));
-    g.open("t", "fs.read", Risk::Read, "read /x".into());
+    g.open("t", "fs.read", Risk::Read, "read /x".into())
+        .unwrap();
     assert_eq!(*seen.lock().unwrap(), vec!["read /x".to_string()]);
 }
 
@@ -118,7 +119,7 @@ fn overwrite_summary_says_overwrite() {
 #[test]
 fn result_published_before_anyone_listens_is_still_delivered() {
     let g = Gate::new(Duration::from_secs(60));
-    let o = g.open("t", "exec", Risk::Read, "x".into());
+    let o = g.open("t", "exec", Risk::Read, "x".into()).unwrap();
     let id = o.id.clone();
     drop(o); // 원래 HTTP 요청이 끊긴 상황: 구독자 없음
     g.publish(&id, Ok(serde_json::json!({"ok": true})));

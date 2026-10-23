@@ -30,6 +30,19 @@ fn proxy_url_rules() {
         "127.0.0.1:1055",
         "socks5://127.0.0.1.evil.com:1055",
         "socks5://localhost.evil.com:1055",
+        // ureq 는 마지막 `@` 앞을 인증 정보로 보고 그 뒤 호스트로 접속한다: 앞쪽만 보고 허용하면 우회된다.
+        "socks5://localhost:80@evil.example",
+        "socks5://127.0.0.1@evil.example:1080",
+        "socks5://[::1]:1@127.0.0.2",
+        "socks5://localhost:99999",
+        "socks5://localhost:0",
+        "socks5://localhost:",
+        "socks5://::1:1055",
+        "socks5://localhost/path",
+        "socks5://localhost?x=1",
+        "socks5://localhost#frag",
+        "socks5://local%68ost:1055",
+        "socks5://localhost\\@evil.example",
         "",
     ] {
         assert!(!proxy_url_ok(bad), "{bad}");

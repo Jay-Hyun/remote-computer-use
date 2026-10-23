@@ -69,12 +69,16 @@ impl Audit {
 
     pub fn log(&self, mut entry: Entry<'_>) -> anyhow::Result<()> {
         entry.target = redact(&entry.target);
-        std::fs::create_dir_all(&self.dir)?;
+        crate::config::create_private_dir(&self.dir)?;
         let path = self.file_for(OffsetDateTime::now_utc().date());
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(path)?;
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
         file.write_all(&line)?;

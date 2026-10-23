@@ -12,6 +12,15 @@ pub trait SecretStore {
     fn delete(&self, node: &str) -> anyhow::Result<()>;
 }
 
+/// 노드 이름: 소문자·숫자·하이픈(1~32자). 이 범위에서는 환경 변수 이름(`-`→`_`)이 이름마다 겹치지 않는다.
+pub fn valid_node_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_alphanumeric()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
 pub fn env_var_name(node: &str) -> String {
     let key: String = node
         .chars()

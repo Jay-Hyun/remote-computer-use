@@ -7,7 +7,7 @@ repository = "https://github.com/Jay-Hyun/remote-computer-use"
 readme = "README.md"
 keywords = ["remote", "tailscale", "agent", "cli"]
 categories = ["command-line-utilities"]
-rust-version = "1.82"
+rust-version = "1.89"
 description = "remote-computer-use: node agent and controller CLI"
 
 [lib]
@@ -33,6 +33,8 @@ subtle = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 toml = "0.8"
+tower = { version = "0.5", default-features = false, features = ["limit"] }
+tower-http = { version = "0.6", default-features = false, features = ["timeout"] }
 ureq = { version = "2", default-features = false, features = ["json", "socks-proxy"] }
 
 [dev-dependencies]

@@ -364,7 +364,9 @@ async fn exec_runs_without_a_shell_and_caps_output() {
 
     // 끝없이 출력하는 명령: 출력은 상한에서 잘리고 시간 제한에서 끝난다.
     let yes = tool(&["/usr/bin/yes", "/bin/yes"]).unwrap();
-    let v = exec(&t, &yes, &["x"]).await.unwrap();
+    // `yes` 는 write 위험도라 echo(read)의 그랜트로는 부족하다. 따로 승인한다.
+    let (res, _) = tokio::join!(exec(&t, &yes, &["x"]), approve(&t.state, Decision::Once));
+    let v = res.unwrap();
     assert_eq!(v["truncated"], true);
     assert_eq!(v["timed_out"], true);
     assert!(v["stdout"].as_str().unwrap().len() <= 2048);

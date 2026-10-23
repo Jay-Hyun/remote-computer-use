@@ -75,6 +75,30 @@ fn which(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 윈도우 승인 창(고정 스크립트). 결과는 `once` / `grant` / `deny` 중 하나를 출력한다.
+const PS_APPROVAL_FORM: &str = "\
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+$f = New-Object System.Windows.Forms.Form; $f.Tag = 'deny'; \
+$f.Text = $env:RCU_PROMPT_TITLE; $f.TopMost = $true; $f.StartPosition = 'CenterScreen'; \
+$f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; \
+$f.ClientSize = New-Object System.Drawing.Size(620, 300); \
+$t = New-Object System.Windows.Forms.TextBox; $t.Multiline = $true; $t.ReadOnly = $true; \
+$t.ScrollBars = 'Vertical'; $t.Text = $env:RCU_PROMPT_BODY; \
+$t.Location = New-Object System.Drawing.Point(12, 12); $t.Size = New-Object System.Drawing.Size(596, 230); \
+$f.Controls.Add($t); \
+function New-Btn($text, $x, $val) { \
+  $b = New-Object System.Windows.Forms.Button; $b.Text = $text; $b.Tag = $val; \
+  $b.Size = New-Object System.Drawing.Size(190, 36); $b.Location = New-Object System.Drawing.Point($x, 252); \
+  $b.Add_Click({ param($s, $e) $form = $s.FindForm(); $form.Tag = $s.Tag; $form.Close() }); \
+  $f.Controls.Add($b); return $b }; \
+$deny = New-Btn 'Deny' 12 'deny'; \
+$once = New-Btn $env:RCU_LABEL_ONCE 215 'once'; \
+if ($env:RCU_ALLOW_GRANT -eq '1') { $grant = New-Btn $env:RCU_LABEL_GRANT 418 'grant' }; \
+$f.AcceptButton = $deny; $f.CancelButton = $deny; \
+$timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 290000; \
+$timer.Add_Tick({ $f.Close() }); $timer.Start(); \
+[void]$f.ShowDialog(); Write-Output $f.Tag";
+
 pub fn build_command(platform: Platform, p: &Prompt) -> Command {
     match platform {
         Platform::MacOs => {
@@ -101,30 +125,20 @@ pub fn build_command(platform: Platform, p: &Prompt) -> Command {
             cmd
         }
         Platform::Windows => {
-            let legend = if p.allow_grant {
-                format!(
-                    "\n\nYes = {}   No = {}   Cancel = deny",
-                    once_label(),
-                    grant_label(p)
-                )
-            } else {
-                format!("\n\nYes = {}   No = deny", once_label())
-            };
-            let (buttons, default) = if p.allow_grant {
-                ("YesNoCancel", "Button3")
-            } else {
-                ("YesNo", "Button2")
-            };
-            let script = format!(
-                "Add-Type -AssemblyName System.Windows.Forms; \
-                 $f = New-Object System.Windows.Forms.Form -Property @{{TopMost=$true}}; \
-                 $r = [System.Windows.Forms.MessageBox]::Show($f, $env:RCU_PROMPT_BODY, $env:RCU_PROMPT_TITLE, \
-                 '{buttons}', 'Warning', '{default}'); Write-Output $r"
-            );
+            // 버튼에 이름을 붙인 작은 창. (MessageBox 의 예/아니오/취소는 "아니오"를 거부로 읽는 사람이
+            // 기간 승인을 누르게 만든다.) 요청 설명은 환경 변수로만 전달하고 스크립트에는 넣지 않는다.
             let mut cmd = Command::new("powershell");
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                .env("RCU_PROMPT_BODY", format!("{}{legend}", p.body))
-                .env("RCU_PROMPT_TITLE", &p.title);
+            cmd.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                PS_APPROVAL_FORM,
+            ])
+            .env("RCU_PROMPT_BODY", &p.body)
+            .env("RCU_PROMPT_TITLE", &p.title)
+            .env("RCU_LABEL_ONCE", once_label())
+            .env("RCU_LABEL_GRANT", grant_label(p))
+            .env("RCU_ALLOW_GRANT", if p.allow_grant { "1" } else { "0" });
             cmd
         }
         Platform::Linux => {
@@ -171,8 +185,8 @@ pub fn parse_outcome(platform: Platform, p: &Prompt, success: bool, stdout: &str
             }
         }
         Platform::Windows => match out {
-            "Yes" => Decision::Once,
-            "No" if p.allow_grant => Decision::Grant,
+            "once" => Decision::Once,
+            "grant" if p.allow_grant => Decision::Grant,
             _ => Decision::Deny,
         },
         Platform::Linux => {

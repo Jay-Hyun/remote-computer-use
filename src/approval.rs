@@ -4,7 +4,7 @@ use crate::ops::OpResult;
 use crate::policy::Risk;
 use rand::RngCore;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
@@ -43,8 +43,8 @@ struct Entry {
 
 #[derive(Default)]
 struct Inner {
-    /// (토큰 id, 능력) → 만료 시각
-    grants: HashMap<(String, String), Instant>,
+    /// (토큰 id, 능력, 위험도 순위) → 만료 시각. 위험도별로 따로 승인받는다(`read` 승인이 `write` 를 열지 않는다).
+    grants: HashMap<(String, String, u8), Instant>,
     entries: HashMap<String, Entry>,
     order: Vec<String>,
 }
@@ -74,9 +74,9 @@ impl Gate {
         *self.notifier.lock().unwrap() = Some(notifier);
     }
 
-    pub fn grant_alive(&self, token_id: &str, capability: &str, now: Instant) -> bool {
+    pub fn grant_alive(&self, token_id: &str, capability: &str, risk: Risk, now: Instant) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        let key = (token_id.to_string(), capability.to_string());
+        let key = (token_id.to_string(), capability.to_string(), risk.rank());
         match inner.grants.get(&key) {
             Some(expires) if *expires > now => true,
             Some(_) => {
@@ -87,19 +87,37 @@ impl Gate {
         }
     }
 
-    pub fn add_grant(&self, token_id: &str, capability: &str, now: Instant) {
+    pub fn add_grant(&self, token_id: &str, capability: &str, risk: Risk, now: Instant) {
         self.inner.lock().unwrap().grants.insert(
-            (token_id.to_string(), capability.to_string()),
+            (token_id.to_string(), capability.to_string(), risk.rank()),
             now + self.grant_ttl,
         );
     }
 
-    /// 토큰을 폐기할 때 그 토큰의 그랜트도 지운다.
-    pub fn clear_grants(&self) {
-        self.inner.lock().unwrap().grants.clear();
+    /// 더는 발급된 상태가 아닌 토큰(폐기됨)의 그랜트를 지우고, 그 토큰의 대기 중 요청을 거부한다.
+    /// 거부된 대기 요청의 수를 돌려준다.
+    pub fn drop_revoked(&self, exists: impl Fn(&str) -> bool) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        inner.grants.retain(|(token, _, _), _| exists(token));
+        let mut denied = 0;
+        for entry in inner.entries.values_mut() {
+            if entry.finished.is_none() && !exists(&entry.token_id) {
+                if let Some(tx) = entry.decision_tx.take() {
+                    let _ = tx.send(Decision::Deny);
+                    denied += 1;
+                }
+            }
+        }
+        denied
     }
 
-    pub fn open(&self, token_id: &str, capability: &str, risk: Risk, summary: String) -> Opened {
+    pub fn open(
+        &self,
+        token_id: &str,
+        capability: &str,
+        risk: Risk,
+        summary: String,
+    ) -> Result<Opened, OpenError> {
         let (decision_tx, decision_rx) = oneshot::channel();
         let (result_tx, result_rx) = watch::channel(None);
         let info;
@@ -110,8 +128,27 @@ impl Gate {
                 e.finished
                     .is_none_or(|t| now.saturating_duration_since(t) < RESULT_KEEP)
             });
-            let live: Vec<String> = inner.entries.keys().cloned().collect();
-            inner.order.retain(|id| live.contains(id));
+            let live: HashSet<&String> = inner.entries.keys().collect();
+            let order: Vec<String> = inner
+                .order
+                .iter()
+                .filter(|id| live.contains(id))
+                .cloned()
+                .collect();
+            inner.order = order;
+
+            // 승인 대기가 쌓여 노드 사용자가 질문 폭탄을 맞거나 메모리가 새는 것을 막는다.
+            let waiting: Vec<&Entry> = inner
+                .entries
+                .values()
+                .filter(|e| e.decision_tx.is_some())
+                .collect();
+            if waiting.len() >= MAX_PENDING_TOTAL {
+                return Err(OpenError::TooManyTotal);
+            }
+            if waiting.iter().filter(|e| e.token_id == token_id).count() >= MAX_PENDING_PER_TOKEN {
+                return Err(OpenError::TooManyForToken);
+            }
 
             let mut id = new_id();
             while inner.entries.contains_key(&id) {
@@ -138,11 +175,11 @@ impl Gate {
         if let Some(notify) = self.notifier.lock().unwrap().as_ref() {
             notify(&info);
         }
-        Opened {
+        Ok(Opened {
             id: info.id,
             decision_rx,
             result_rx,
-        }
+        })
     }
 
     pub fn publish(&self, id: &str, result: OpResult) {
@@ -177,6 +214,29 @@ impl Gate {
         None
     }
 
+    /// 터미널 답변용: id 앞부분(2자 이상)으로 대기 중인 요청 하나를 고른다.
+    pub fn resolve_prefix(
+        &self,
+        prefix: &str,
+        decision: Decision,
+    ) -> Result<PendingInfo, ResolveError> {
+        if prefix.len() < 2 {
+            return Err(ResolveError::NoMatch);
+        }
+        let matches: Vec<PendingInfo> = self
+            .waiting()
+            .into_iter()
+            .filter(|p| p.id.starts_with(prefix))
+            .collect();
+        match matches.as_slice() {
+            [] => Err(ResolveError::NoMatch),
+            [one] => self
+                .resolve(Some(&one.id), decision)
+                .ok_or(ResolveError::NoMatch),
+            _ => Err(ResolveError::Ambiguous),
+        }
+    }
+
     pub fn waiting(&self) -> Vec<PendingInfo> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -201,6 +261,48 @@ impl Gate {
             entry.decision_tx = None;
         }
     }
+}
+
+/// 한 토큰이 동시에 승인 대기를 걸 수 있는 요청 수와 노드 전체 상한.
+pub const MAX_PENDING_PER_TOKEN: usize = 5;
+pub const MAX_PENDING_TOTAL: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenError {
+    TooManyForToken,
+    TooManyTotal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveError {
+    NoMatch,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalAnswer {
+    pub decision: Decision,
+    pub id: Option<String>,
+}
+
+/// 터미널 한 줄 답변: `y`, `a`, `n` 다음에 선택적으로 요청 id(앞부분). 알아듣지 못하면 None.
+pub fn parse_terminal_answer(line: &str) -> Option<TerminalAnswer> {
+    let mut parts = line.split_whitespace();
+    let decision = match parts.next()?.to_ascii_lowercase().as_str() {
+        "y" | "yes" => Decision::Once,
+        "a" | "always" => Decision::Grant,
+        "n" | "no" => Decision::Deny,
+        _ => return None,
+    };
+    let id = parts.next().map(|s| s.to_ascii_lowercase());
+    if parts.next().is_some()
+        || id
+            .as_ref()
+            .is_some_and(|i| !i.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+    Some(TerminalAnswer { decision, id })
 }
 
 fn new_id() -> String {

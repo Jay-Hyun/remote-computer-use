@@ -52,28 +52,57 @@ impl TokenStore {
 
     fn write(&self, file: &File) -> anyhow::Result<()> {
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
+            crate::config::create_private_dir(dir)?;
         }
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(file)?)?;
-        set_private(&tmp)?;
+        crate::config::write_private(&tmp, &serde_json::to_vec_pretty(file)?)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// 읽고-고치고-쓰는 동안 다른 프로세스(`rcu revoke`, 실행 중인 노드의 페어링)와 겹치지 않게 파일 잠금을 건다.
+    fn locked<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        if let Some(dir) = self.path.parent() {
+            crate::config::create_private_dir(dir)?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.path.with_extension("lock"))?;
+        lock.lock()?;
+        let result = f();
+        let _ = lock.unlock();
+        result
     }
 
     /// 새 토큰을 발급한다. 원문은 이 반환값으로만 볼 수 있다.
     pub fn issue(&self, label: &str, created: &str) -> anyhow::Result<String> {
         let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>());
         let token = format!("rcu_{secret}");
-        let mut file = self.read()?;
-        file.tokens.push(Entry {
-            id: hex(&random_bytes::<4>()),
-            label: label.chars().take(64).collect(),
-            hash: hash_token(&token),
-            created: created.to_string(),
-        });
-        self.write(&file)?;
-        Ok(token)
+        self.locked(|| {
+            let mut file = self.read()?;
+            // 토큰 id 는 승인·그랜트·속도 제한의 열쇠이므로 겹치지 않게 다시 뽑는다.
+            let mut id = hex(&random_bytes::<8>());
+            while file.tokens.iter().any(|t| t.id == id) {
+                id = hex(&random_bytes::<8>());
+            }
+            file.tokens.push(Entry {
+                id,
+                label: label.chars().take(64).collect(),
+                hash: hash_token(&token),
+                created: created.to_string(),
+            });
+            self.write(&file)?;
+            Ok(token)
+        })
+    }
+
+    /// 이 id 의 토큰이 아직 발급된 상태인지(폐기되면 false).
+    pub fn exists(&self, id: &str) -> bool {
+        self.read()
+            .map(|f| f.tokens.iter().any(|t| t.id == id))
+            .unwrap_or(false)
     }
 
     /// 맞는 토큰이면 토큰 id 를 돌려준다. 모든 항목을 상수 시간으로 비교한다.
@@ -90,10 +119,12 @@ impl TokenStore {
     }
 
     pub fn revoke_all(&self) -> anyhow::Result<usize> {
-        let file = self.read()?;
-        let n = file.tokens.len();
-        self.write(&File::default())?;
-        Ok(n)
+        self.locked(|| {
+            let file = self.read()?;
+            let n = file.tokens.len();
+            self.write(&File::default())?;
+            Ok(n)
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -103,16 +134,4 @@ impl TokenStore {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-#[cfg(unix)]
-fn set_private(path: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
 }

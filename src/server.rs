@@ -2,27 +2,41 @@
 //!
 //! `GET /v1/info`, `POST /v1/pair`, `POST /v1/exec`, `POST /v1/fs/read`, `POST /v1/fs/write`,
 //! `GET /v1/approvals/:id`.
+//!
+//! 순서 원칙: 인증(토큰·속도 제한)을 먼저 하고, 통과한 요청의 본문만 읽는다.
 
-use crate::approval::{Decision, Gate, APPROVAL_TIMEOUT};
+use crate::approval::{Decision, Gate, OpenError, APPROVAL_TIMEOUT};
 use crate::audit::{Audit, Entry};
 use crate::limits::{Limit, Limiter};
 use crate::ops::{self, Op, OpError, OpResult};
 use crate::pairing::{PairError, Pairing};
 use crate::policy::{Policy, Risk};
 use crate::tokens::TokenStore;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use rand::RngCore;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use tokio::sync::watch;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
+
+/// 요청 본문 상한(인증 뒤). 페어링은 훨씬 작게.
+const BODY_LIMIT: usize = 4 * 1024 * 1024;
+const PAIR_BODY_LIMIT: usize = 4 * 1024;
+/// 동시에 열려 있는 연결(요청) 수 상한.
+const MAX_IN_FLIGHT: usize = 128;
+/// 인증에 실패한 출처(IP)가 분당 보낼 수 있는 요청 수.
+const PRE_AUTH_PER_MINUTE: u32 = 30;
 
 pub struct AppState {
     pub policy: Policy,
@@ -31,6 +45,10 @@ pub struct AppState {
     pub audit: Audit,
     pub gate: Arc<Gate>,
     pub limiter: Limiter,
+    /// 인증 실패·잘못된 페어링을 출처별로 센다.
+    pre_auth: Limiter,
+    /// 인증 실패 감사 줄은 초당 한 줄만 쓰고 나머지는 개수만 센다(로그 폭주 방지).
+    auth_fail_log: Mutex<(Instant, u64)>,
     /// 한 HTTP 요청이 승인을 기다리는 최대 시간. 넘기면 202 + approval_id.
     pub http_wait: Duration,
 }
@@ -47,6 +65,8 @@ impl AppState {
             audit,
             gate,
             limiter,
+            pre_auth: Limiter::new(PRE_AUTH_PER_MINUTE, u32::MAX),
+            auth_fail_log: Mutex::new((Instant::now() - Duration::from_secs(10), 0)),
             http_wait,
         }
     }
@@ -73,6 +93,8 @@ fn op_err(e: &OpError) -> ApiError {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // 승인 대기(최대 http_wait)보다 조금 길게. 끝없이 열려 있는 연결을 정리한다.
+    let request_timeout = state.http_wait + Duration::from_secs(30);
     Router::new()
         .route("/v1/info", get(info))
         .route("/v1/pair", post(pair))
@@ -80,12 +102,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/fs/read", post(fs_read))
         .route("/v1/fs/write", post(fs_write))
         .route("/v1/approvals/:id", get(approval_result))
-        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT))
         .with_state(state)
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
-    axum::serve(listener, router(state)).await
+    // 토큰이 폐기되면(`rcu revoke --all`, 다른 프로세스) 그 토큰의 그랜트와 대기 요청을 곧바로 정리한다.
+    let watcher = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let tokens = watcher.tokens.lock().unwrap().clone();
+            watcher.gate.drop_revoked(|id| tokens.exists(id));
+        }
+    });
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 fn random_id() -> String {
@@ -94,6 +134,7 @@ fn random_id() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// 감사 줄을 쓴다. 쓰지 못하면 false.
 #[allow(clippy::too_many_arguments)]
 fn audit_entry(
     state: &AppState,
@@ -104,7 +145,7 @@ fn audit_entry(
     approval: Option<&str>,
     result: &str,
     started: Instant,
-) {
+) -> bool {
     let entry = Entry {
         ts: Audit::now(),
         request_id,
@@ -115,9 +156,38 @@ fn audit_entry(
         result,
         duration_ms: started.elapsed().as_millis() as u64,
     };
-    if let Err(e) = state.audit.log(entry) {
-        eprintln!("audit write failed: {e}");
+    match state.audit.log(entry) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("audit write failed: {e}");
+            false
+        }
     }
+}
+
+/// 인증 실패 기록: 초당 한 줄로 줄이고 건너뛴 수를 다음 줄에 적는다.
+fn audit_auth_failure(state: &AppState, capability: &str, code: &str, peer: IpAddr) {
+    let skipped = {
+        let mut last = state.auth_fail_log.lock().unwrap();
+        if last.0.elapsed() < Duration::from_secs(1) {
+            last.1 += 1;
+            return;
+        }
+        let skipped = last.1;
+        *last = (Instant::now(), 0);
+        skipped
+    };
+    let target = format!("peer={peer} (+{skipped} more failures since the last line)");
+    audit_entry(
+        state,
+        &random_id(),
+        capability,
+        &target,
+        None,
+        None,
+        code,
+        Instant::now(),
+    );
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -128,25 +198,43 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+fn today() -> time::Date {
+    OffsetDateTime::now_utc().date()
+}
+
 /// 토큰이 발급된 것인지 확인하고 속도 제한을 센다. 모든 인증 요청의 첫 관문.
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
-    let unauthorized = || {
-        err(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "missing or invalid token",
-        )
+/// 인증에 실패한 출처는 분당 횟수를 제한하고, 실패 기록은 줄여서 남긴다.
+fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: IpAddr,
+    capability: &str,
+) -> Result<String, ApiError> {
+    let id = bearer(headers).and_then(|token| state.tokens.lock().unwrap().verify(token));
+    let Some(id) = id else {
+        let throttled = state
+            .pre_auth
+            .check(&peer.to_string(), Instant::now(), today())
+            .is_err();
+        let (status, code, message) = if throttled {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "too many failed attempts from this address; slow down",
+            )
+        } else {
+            (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "missing or invalid token",
+            )
+        };
+        audit_auth_failure(state, capability, code, peer);
+        return Err(err(status, code, message));
     };
-    let token = bearer(headers).ok_or_else(unauthorized)?;
-    let id = state
-        .tokens
-        .lock()
-        .unwrap()
-        .verify(token)
-        .ok_or_else(unauthorized)?;
     state
         .limiter
-        .check(&id, Instant::now(), OffsetDateTime::now_utc().date())
+        .check(&id, Instant::now(), today())
         .map_err(|limit| match limit {
             Limit::Minute => err(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -162,32 +250,33 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
     Ok(id)
 }
 
-fn auth_or_log(
-    state: &AppState,
-    headers: &HeaderMap,
-    capability: &str,
-    started: Instant,
-) -> Result<String, ApiError> {
-    authenticate(state, headers).inspect_err(|e| {
-        audit_entry(
-            state,
-            &random_id(),
-            capability,
-            "",
-            None,
-            None,
-            e.1 .0.code,
-            started,
-        );
+/// 인증이 끝난 뒤에만 본문을 읽는다.
+async fn read_json<T: DeserializeOwned>(req: Request, limit: usize) -> Result<T, ApiError> {
+    let bytes = axum::body::to_bytes(req.into_body(), limit)
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "TOO_LARGE",
+                "request body is too large",
+            )
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "request body is not valid JSON for this endpoint",
+        )
     })
 }
 
 async fn info(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let started = Instant::now();
-    auth_or_log(&state, &headers, "info", started)?;
+    authenticate(&state, &headers, peer.ip(), "info")?;
     audit_entry(
         &state,
         &random_id(),
@@ -215,20 +304,36 @@ struct PairRequest {
 
 async fn pair(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<PairRequest>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
 ) -> Result<Json<Value>, ApiError> {
     let started = Instant::now();
+    let source = peer.ip().to_string();
+    // 페어링 시도도 출처별로 제한한다(틀린 코드로 계속 두드리는 출처만 막는다).
+    if state
+        .pre_auth
+        .check(&source, Instant::now(), today())
+        .is_err()
+    {
+        audit_auth_failure(&state, "pair", "RATE_LIMITED", peer.ip());
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "too many pairing attempts from this address; slow down",
+        ));
+    }
+    let req: PairRequest = read_json(req, PAIR_BODY_LIMIT).await?;
     let outcome = state
         .pairing
         .lock()
         .unwrap()
-        .attempt(&req.code, Instant::now());
+        .attempt_from(&source, &req.code, Instant::now());
     if let Err(e) = outcome {
         audit_entry(
             &state,
             &random_id(),
             "pair",
-            "",
+            &format!("peer={source}"),
             None,
             None,
             e.code(),
@@ -264,7 +369,16 @@ async fn pair(
                 "could not store token",
             )
         })?;
-    audit_entry(&state, &random_id(), "pair", "", None, None, "OK", started);
+    audit_entry(
+        &state,
+        &random_id(),
+        "pair",
+        &format!("peer={source}"),
+        None,
+        None,
+        "OK",
+        started,
+    );
     Ok(Json(
         json!({ "token": token, "node": state.policy.node_name }),
     ))
@@ -292,22 +406,21 @@ struct WriteRequest {
 
 async fn exec(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<ExecRequest>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
 ) -> Response {
     let started = Instant::now();
-    match auth_or_log(&state, &headers, "exec", started) {
-        Ok(token_id) => {
-            submit(
-                state,
-                token_id,
-                Op::Exec {
-                    program: req.program,
-                    args: req.args,
-                },
-                started,
-            )
-            .await
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "exec") {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match read_json::<ExecRequest>(req, BODY_LIMIT).await {
+        Ok(body) => {
+            let op = Op::Exec {
+                program: body.program,
+                args: body.args,
+            };
+            submit(state, token_id, op, started).await
         }
         Err(e) => e.into_response(),
     }
@@ -315,27 +428,35 @@ async fn exec(
 
 async fn fs_read(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<ReadRequest>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
 ) -> Response {
     let started = Instant::now();
-    match auth_or_log(&state, &headers, "fs.read", started) {
-        Ok(token_id) => submit(state, token_id, Op::Read { path: req.path }, started).await,
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "fs.read") {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match read_json::<ReadRequest>(req, BODY_LIMIT).await {
+        Ok(body) => submit(state, token_id, Op::Read { path: body.path }, started).await,
         Err(e) => e.into_response(),
     }
 }
 
 async fn fs_write(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<WriteRequest>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
 ) -> Response {
     let started = Instant::now();
-    let token_id = match auth_or_log(&state, &headers, "fs.write", started) {
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "fs.write") {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    let Ok(data) = base64::engine::general_purpose::STANDARD.decode(req.content_b64.as_bytes())
+    let body = match read_json::<WriteRequest>(req, BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let Ok(data) = base64::engine::general_purpose::STANDARD.decode(body.content_b64.as_bytes())
     else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -344,26 +465,21 @@ async fn fs_write(
         )
         .into_response();
     };
-    submit(
-        state,
-        token_id,
-        Op::Write {
-            path: req.path,
-            data,
-            overwrite: req.overwrite,
-        },
-        started,
-    )
-    .await
+    let op = Op::Write {
+        path: body.path,
+        data,
+        overwrite: body.overwrite,
+    };
+    submit(state, token_id, op, started).await
 }
 
 async fn approval_result(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let started = Instant::now();
-    let token_id = match auth_or_log(&state, &headers, "approval", started) {
+    let token_id = match authenticate(&state, &headers, peer.ip(), "approval") {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
@@ -414,17 +530,69 @@ async fn wait_result(
     }
 }
 
-async fn run_blocking(state: Arc<AppState>, op: Op, approved: Risk) -> OpResult {
-    tokio::task::spawn_blocking(move || ops::execute(&state.policy, &op, approved))
-        .await
-        .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")))
-}
-
 fn result_code(result: &OpResult) -> &'static str {
     match result {
         Ok(_) => "OK",
         Err(e) => e.code,
     }
+}
+
+/// 실행 한 번: 토큰이 아직 유효한지 확인 → 감사 "START" 기록(못 쓰면 실행하지 않음) → 실행 → 결과 기록.
+/// 호출자(HTTP 요청)가 끊겨도 끝까지 가도록 별도 태스크에서 돌린다.
+async fn run_audited(
+    state: Arc<AppState>,
+    token_id: String,
+    op: Op,
+    plan: ops::Plan,
+    approval: &'static str,
+    request_id: String,
+    started: Instant,
+) -> OpResult {
+    let handle = tokio::spawn(async move {
+        if !state.tokens.lock().unwrap().exists(&token_id) {
+            return Err(OpError::new(
+                401,
+                "UNAUTHORIZED",
+                "this token was revoked while the request was waiting",
+            ));
+        }
+        let wrote = audit_entry(
+            &state,
+            &request_id,
+            plan.capability,
+            &plan.target,
+            Some(plan.risk),
+            Some(approval),
+            "START",
+            started,
+        );
+        if !wrote {
+            return Err(OpError::new(
+                500,
+                "AUDIT_FAILED",
+                "the node could not write its audit log; refusing to run",
+            ));
+        }
+        let risk = plan.risk;
+        let st = Arc::clone(&state);
+        let result = tokio::task::spawn_blocking(move || ops::execute(&st.policy, &op, risk))
+            .await
+            .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")));
+        audit_entry(
+            &state,
+            &request_id,
+            plan.capability,
+            &plan.target,
+            Some(plan.risk),
+            Some(approval),
+            result_code(&result),
+            started,
+        );
+        result
+    });
+    handle
+        .await
+        .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")))
 }
 
 /// 정책 검사 → (그랜트가 있으면 바로 실행 | 노드 사용자 승인 대기) → 실행.
@@ -436,7 +604,7 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
                 &state,
                 &random_id(),
                 "op",
-                &ops::sanitize_for_display(&describe(&op)),
+                &ops::sanitize_for_display(&ops::summary(&op)),
                 None,
                 None,
                 e.code,
@@ -449,26 +617,49 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
     if !plan.risk.always_needs_approval()
         && state
             .gate
-            .grant_alive(&token_id, plan.capability, Instant::now())
+            .grant_alive(&token_id, plan.capability, plan.risk, Instant::now())
     {
-        let result = run_blocking(state.clone(), op, plan.risk).await;
-        audit_entry(
-            &state,
-            &random_id(),
-            plan.capability,
-            &plan.target,
-            Some(plan.risk),
-            Some("grant"),
-            result_code(&result),
+        let result = run_audited(
+            state.clone(),
+            token_id,
+            op,
+            plan,
+            "grant",
+            random_id(),
             started,
-        );
+        )
+        .await;
         return respond(&result);
     }
 
     let wait = state.http_wait;
-    let opened = state
+    let opened = match state
         .gate
-        .open(&token_id, plan.capability, plan.risk, plan.summary.clone());
+        .open(&token_id, plan.capability, plan.risk, plan.summary.clone())
+    {
+        Ok(o) => o,
+        Err(why) => {
+            let message = match why {
+                OpenError::TooManyForToken => {
+                    "too many of your requests are already waiting for approval on the node"
+                }
+                OpenError::TooManyTotal => {
+                    "too many requests are waiting for approval on the node; try later"
+                }
+            };
+            audit_entry(
+                &state,
+                &random_id(),
+                plan.capability,
+                &plan.target,
+                Some(plan.risk),
+                None,
+                "BUSY",
+                started,
+            );
+            return err(StatusCode::TOO_MANY_REQUESTS, "BUSY", message).into_response();
+        }
+    };
     let id = opened.id.clone();
     tokio::spawn(drive(
         state,
@@ -482,10 +673,6 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
     wait_result(opened.result_rx, &id, wait).await
 }
 
-fn describe(op: &Op) -> String {
-    ops::summary(op)
-}
-
 /// 승인 결정을 기다렸다가 실행하고 결과를 게시한다. HTTP 연결이 끊겨도 한 번만 실행된다.
 async fn drive(
     state: Arc<AppState>,
@@ -497,15 +684,24 @@ async fn drive(
     started: Instant,
 ) {
     let decided = tokio::time::timeout(APPROVAL_TIMEOUT, decision_rx).await;
+    let run = |state: Arc<AppState>, token_id: String, op: Op, plan: ops::Plan, label| {
+        run_audited(state, token_id, op, plan, label, random_id(), started)
+    };
     let (approval, result) = match decided {
-        Ok(Ok(Decision::Once)) => ("once", run_blocking(state.clone(), op, plan.risk).await),
+        Ok(Ok(Decision::Once)) => (
+            "once",
+            run(state.clone(), token_id, op, plan.clone(), "once").await,
+        ),
         Ok(Ok(Decision::Grant)) => {
             if !plan.risk.always_needs_approval() {
                 state
                     .gate
-                    .add_grant(&token_id, plan.capability, Instant::now());
+                    .add_grant(&token_id, plan.capability, plan.risk, Instant::now());
             }
-            ("grant", run_blocking(state.clone(), op, plan.risk).await)
+            (
+                "grant",
+                run(state.clone(), token_id, op, plan.clone(), "grant").await,
+            )
         }
         Ok(Ok(Decision::Deny)) | Ok(Err(_)) => (
             "deny",
@@ -527,15 +723,17 @@ async fn drive(
             )
         }
     };
-    audit_entry(
-        &state,
-        &id,
-        plan.capability,
-        &plan.target,
-        Some(plan.risk),
-        Some(approval),
-        result_code(&result),
-        started,
-    );
+    if matches!(approval, "deny" | "timeout") {
+        audit_entry(
+            &state,
+            &id,
+            plan.capability,
+            &plan.target,
+            Some(plan.risk),
+            Some(approval),
+            result_code(&result),
+            started,
+        );
+    }
     state.gate.publish(&id, result);
 }

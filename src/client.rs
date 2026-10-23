@@ -97,16 +97,41 @@ pub fn proxy_url_ok(url: &str) -> bool {
     else {
         return false;
     };
-    let authority = rest.split('/').next().unwrap_or("");
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(""),
-        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    // `user@host` 같은 인증 정보, 경로, 질의, 퍼센트 인코딩은 쓰지 않는다. ureq 는 마지막 `@` 앞을
+    // 인증 정보로 보고 그 뒤 호스트로 접속하므로, 문자열 앞쪽만 보고 허용하면 우회된다.
+    if rest.is_empty() || rest.contains(['@', '/', '?', '#', '%', '\\', ' ']) {
+        return false;
+    }
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((h, "")) => (h, None),
+            Some((h, after)) => match after.strip_prefix(':') {
+                Some(p) => (h, Some(p)),
+                None => return false,
+            },
+            None => return false,
+        },
+        None => match rest.rsplit_once(':') {
+            // 대괄호 없는 IPv6 는 모호하다(`::1:1055` 가 주소인지 포트인지).
+            Some((h, _)) if h.contains(':') => return false,
+            Some((h, p)) => (h, Some(p)),
+            None => (rest, None),
+        },
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    let port_ok = port.is_none_or(|p| {
+        !p.is_empty()
+            && p.len() <= 5
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
+    });
+    port_ok && matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn agent() -> Result<ureq::Agent, ClientError> {
+    // 리다이렉트는 따라가지 않는다: 노드(또는 그 IP에서 응답하는 무언가)가 컨트롤러를 다른 주소로 보낼 수 없다.
     let mut builder = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout_connect(Duration::from_secs(5))
         .timeout(Duration::from_secs(70));
     if let Some(url) = std::env::var("RCU_PROXY").ok().filter(|v| !v.is_empty()) {

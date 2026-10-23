@@ -63,3 +63,19 @@ pub fn detect_tailnet_ip() -> Option<IpAddr> {
     }
     None
 }
+
+/// 노드가 듣는 주소 검사: 루프백이거나 *이 PC 의* 테일스케일 주소여야 한다.
+/// 100.64.0.0/10 은 다른 CGNAT/VPN 도 쓰는 대역이라, 테일스케일 CLI 로 확인되는 경우에는 그 주소만 허용한다.
+pub fn check_bind(ip: IpAddr) -> anyhow::Result<()> {
+    check_ip(ip)?;
+    if let IpAddr::V4(v4) = ip {
+        if in_cgnat(v4) {
+            if let Some(mine) = detect_tailnet_ip() {
+                if mine != ip {
+                    anyhow::bail!("{ip} is not this PC's Tailscale address ({mine})");
+                }
+            }
+        }
+    }
+    Ok(())
+}

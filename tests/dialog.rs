@@ -107,19 +107,51 @@ fn mac_outcomes() {
 fn windows_outcomes() {
     let p = prompt_for(&info(Risk::Read, "x"), 60);
     let o = |out| parse_outcome(Platform::Windows, &p, true, out);
-    assert_eq!(o("Yes\r\n"), Decision::Once);
-    assert_eq!(o("No\r\n"), Decision::Grant);
-    assert_eq!(o("Cancel\r\n"), Decision::Deny);
-    assert_eq!(o(""), Decision::Deny);
+    assert_eq!(o("once\r\n"), Decision::Once);
+    assert_eq!(o("grant\r\n"), Decision::Grant);
+    assert_eq!(o("deny\r\n"), Decision::Deny);
+    // 예전 MessageBox 응답이나 알 수 없는 출력은 모두 거부
+    for junk in ["Yes", "No", "Cancel", "", "once now"] {
+        assert_eq!(o(junk), Decision::Deny, "{junk:?}");
+    }
     let d = prompt_for(&info(Risk::Destructive, "x"), 60);
     assert_eq!(
-        parse_outcome(Platform::Windows, &d, true, "No"),
+        parse_outcome(Platform::Windows, &d, true, "grant"),
         Decision::Deny
     );
     assert_eq!(
-        parse_outcome(Platform::Windows, &d, true, "Yes"),
+        parse_outcome(Platform::Windows, &d, true, "once"),
         Decision::Once
     );
+}
+
+#[test]
+fn windows_form_has_named_buttons_and_no_request_text_in_the_script() {
+    let p = prompt_for(&info(Risk::Read, "run x"), 45);
+    let cmd = build_command(Platform::Windows, &p);
+    let script = args(&cmd).join(" ");
+    assert!(
+        script.contains("New-Btn 'Deny'")
+            && script.contains("RCU_LABEL_ONCE")
+            && script.contains("RCU_LABEL_GRANT")
+    );
+    assert!(!script.contains("run x"));
+    let env = |k: &str| {
+        cmd.get_envs()
+            .find(|(key, _)| key.to_string_lossy() == k)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    };
+    assert_eq!(env("RCU_ALLOW_GRANT").as_deref(), Some("1"));
+    assert_eq!(env("RCU_LABEL_GRANT").as_deref(), Some("Allow 45 min"));
+    let d = build_command(
+        Platform::Windows,
+        &prompt_for(&info(Risk::Destructive, "x"), 45),
+    );
+    let denv = d
+        .get_envs()
+        .find(|(k, _)| k.to_string_lossy() == "RCU_ALLOW_GRANT")
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+    assert_eq!(denv.as_deref(), Some("0"));
 }
 
 #[test]
@@ -144,7 +176,9 @@ fn linux_outcomes() {
 #[test]
 fn prompt_answer_reaches_the_gate_and_cancels_when_answered_elsewhere() {
     let gate = Arc::new(Gate::new(Duration::from_secs(60)));
-    let opened = gate.open("tok", "exec", Risk::Read, "run /bin/x".into());
+    let opened = gate
+        .open("tok", "exec", Risk::Read, "run /bin/x".into())
+        .unwrap();
     let pending = gate.waiting().remove(0);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -161,7 +195,9 @@ fn prompt_answer_reaches_the_gate_and_cancels_when_answered_elsewhere() {
     assert_eq!(opened.decision_rx.blocking_recv(), Ok(Decision::Once));
 
     // 다른 곳(터미널)에서 먼저 답하면 still_waiting 이 false 가 되어 대화상자가 닫힌다.
-    let opened2 = gate.open("tok", "exec", Risk::Read, "run /bin/y".into());
+    let opened2 = gate
+        .open("tok", "exec", Risk::Read, "run /bin/y".into())
+        .unwrap();
     let pending2 = gate.waiting().remove(0);
     let (tx2, rx2) = std::sync::mpsc::channel();
     let runner: Runner = Arc::new(move |_, still_waiting| {

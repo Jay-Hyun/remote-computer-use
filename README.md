@@ -47,7 +47,7 @@ rcu service uninstall
 **On the PC the agent runs on (the controller)**
 
 ```sh
-rcu pair work-mac 100.101.102.103:7443 ABCD-1234
+rcu pair work-mac 100.101.102.103:7443 ABCD-1234   # node names: lowercase letters, digits, hyphens
 rcu info work-mac
 rcu exec work-mac -- /usr/bin/git status
 rcu read work-mac /Users/me/work/notes.md
