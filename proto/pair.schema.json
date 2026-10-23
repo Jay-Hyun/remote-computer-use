@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "POST /v1/pair",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": { "type": "string", "description": "노드 화면의 8자 코드. 하이픈·소문자 허용" },
+        "controller": { "type": "string", "maxLength": 64, "description": "토큰 라벨(감사용)" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["token", "node"],
+      "properties": {
+        "token": { "type": "string", "pattern": "^rcu_[A-Za-z0-9_-]{43}$", "description": "한 번만 보인다" },
+        "node": { "type": "string" }
+      }
+    }
+  }
+}

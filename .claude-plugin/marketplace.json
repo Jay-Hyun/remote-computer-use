@@ -1,0 +1,16 @@
+{
+  "name": "remote-computer-use",
+  "owner": {
+    "name": "jay-hyun"
+  },
+  "plugins": [
+    {
+      "name": "remote-computer-use",
+      "source": "./plugin",
+      "description": "Operate another Mac/Windows PC over a tailnet through the rcu CLI, with node-side policy and approval."
+    }
+  ],
+  "metadata": {
+    "description": "Personal marketplace for remote-computer-use"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "remote-computer-use",
+  "version": "0.1.0",
+  "description": "Run commands and read/write files on another PC (Mac/Windows) over a tailnet via the rcu CLI. Node-side policy and approval.",
+  "author": {
+    "name": "jay-hyun"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GET /v1/info response",
+  "type": "object",
+  "required": ["name", "os", "version", "capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string" },
+    "os": { "type": "string" },
+    "version": { "type": "string" },
+    "capabilities": {
+      "type": "array",
+      "items": { "enum": ["info", "exec", "fs.read", "fs.write"] }
+    }
+  }
+}

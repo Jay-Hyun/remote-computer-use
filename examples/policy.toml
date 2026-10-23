@@ -1,0 +1,25 @@
+# 복사해서 노드의 policy.toml 로 쓴다. 위치는 `rcu policy-check` 로 확인.
+# 기본은 모두 꺼짐. 필요한 것만 켠다.
+
+[node]
+name = "mac-home"
+
+[capabilities]
+exec = true
+fs_read = true
+fs_write = false
+
+[fs]
+roots = ["~/work"]
+deny = ["**/.env", "**/.ssh/**", "**/*.pem", "**/*.key"]
+max_read_bytes = 1048576
+
+# 셸·래퍼는 넣을 수 없다. 절대 경로 + 좁은 인자 패턴.
+[[exec.allow]]
+program = "/usr/bin/git"
+args = ["status", "*"]
+risk = "read"
+
+[[exec.allow]]
+program = "/usr/bin/uptime"
+risk = "read"
