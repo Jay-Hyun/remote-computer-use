@@ -3,6 +3,7 @@ pub mod audit;
 pub mod bind;
 pub mod client;
 pub mod config;
+pub mod desktop;
 pub mod dialog;
 pub mod exec;
 pub mod fsops;
