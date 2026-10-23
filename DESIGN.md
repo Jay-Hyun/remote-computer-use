@@ -349,3 +349,9 @@ risk    = "read"                   # read | write | destructive | external
 - fs: 허용 루트·거부 패턴 검사 뒤 `O_NOFOLLOW`로 열고, 연 파일의 실제 경로(리눅스 `/proc/self/fd`, 맥 `F_GETPATH`)가 승인한 경로와 같은지 다시 확인한다(윈도우는 M4). 덮어쓰기는 `destructive`, 기존 내용을 `<파일>.rcu-bak`로 복사한 뒤 쓴다. 읽기·쓰기 상한 기본 1MiB.
 - 승인 창에 보이는 요청 설명은 제어 문자를 지우고 300자로 줄인다(요청 문자열로 터미널 화면을 조작하는 것을 막는다).
 - 노드 터미널: 대기 중인 요청이 없을 때 Enter는 새 페어링 코드, 있을 때는 `y`/`a`/`n`만 받는다(빈 Enter는 무시).
+
+### 17.12 설치·배포 자동화 (v0.2)
+- `rcu init`: 모든 능력이 꺼진 `policy.toml`을 만든다(이미 있으면 그대로). `rcu serve`는 `--bind`가 없으면 `tailscale ip -4`로 테일넷 주소를 찾아 7443에서 듣는다. 못 찾으면 이유와 `--bind 127.0.0.1:7443`을 안내하고 멈춘다.
+- `install.sh` / `install.ps1`: 릴리스 바이너리 + `SHA256SUMS`를 받아 검증한 뒤 설치하고 `rcu init`을 돌린다. `claude`/`codex`가 있으면 플러그인·스킬도 설치한다.
+- 릴리스: `v*` 태그를 푸시하면 `.github/workflows/release.yml`이 리눅스(musl 정적)·맥(arm64/x64)·윈도우 바이너리를 빌드해 GitHub Release에 올린다. 태그와 `Cargo.toml` 버전이 다르면 실패한다.
+- 서비스 등록(launchd/윈도우 서비스)은 **아직 없다.** 승인이 노드 터미널 입력이라 터미널 없는 백그라운드 프로세스는 모든 승인 요청이 시간 초과로 거부된다. OS 대화상자 승인(맥 `osascript`, 윈도우 MessageBox)을 붙인 뒤에 추가한다.

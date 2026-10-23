@@ -1,28 +1,90 @@
 # remote-computer-use
 
-Mac/Windows PC 사이에서 AI 세션(Claude Code, Codex, 클라우드 세션)이 다른 PC의 명령·파일을 다루게 하는 도구. 설계는 [DESIGN.md](DESIGN.md).
+Let an AI session (Claude Code, Codex, or a cloud session) run commands and read/write files on **another of your PCs** (Mac / Windows / Linux) — with the other PC deciding what is allowed.
 
-- `rcu`: Rust 단일 실행 파일. `rcu serve`로 노드, 나머지 명령으로 컨트롤러.
-- 테일스케일 위에서만 동작. 노드가 정책(`policy.toml`)과 승인으로 모든 것을 결정한다.
-- MCP 없음. 스킬이 에이전트에게 `rcu` 사용법과 규칙을 가르친다.
+- **One small binary, `rcu`.** `rcu serve` makes a PC a *node*; the other `rcu` commands are the *controller*. Every PC can be both.
+- **No MCP.** The agent calls `rcu` through its shell tool; a skill (`SKILL.md`) teaches it the commands and the rules. Same skill for Claude Code and Codex.
+- **Tailscale only.** The node refuses to listen on anything but loopback or your tailnet, and the controller refuses to send credentials anywhere else.
+- **The node is in charge.** Default deny. A policy file lists the exact programs, folders and sizes allowed. The first request of each kind — and every overwrite or destructive command — waits for a human `y`/`n` in the node's terminal.
 
-## 설치 (M1)
+Status: **v0.2** — commands, files, approvals. Screen capture and input are planned. See [DESIGN.md](DESIGN.md) (Korean) and [SECURITY.md](SECURITY.md).
+
+[한국어 README](README.ko.md)
+
+## Install
+
+Needs [Tailscale](https://tailscale.com) on both PCs.
 
 ```sh
-cargo install --path .                      # rcu
-# Claude Code
-/plugin marketplace add jay-hyun/remote-computer-use
-/plugin install remote-computer-use@remote-computer-use
-# Codex
-scripts/install-codex-skill.sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Jay-Hyun/remote-computer-use/main/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Jay-Hyun/remote-computer-use/main/install.ps1 | iex
 ```
 
-## 쓰기
+The script downloads the release binary, **verifies its SHA-256**, puts `rcu` on your PATH, creates a policy with everything switched off, and installs the Claude Code plugin / Codex skill if those tools are present. Read it first if you like: [install.sh](install.sh), [install.ps1](install.ps1). Or build it yourself: `cargo install --path .`.
 
-노드 PC: `examples/policy.toml`을 `rcu policy-check`가 알려 주는 위치에 두고 `rcu serve --bind <테일스케일 IP>:7443`. 화면의 코드를 컨트롤러에서 `rcu pair <이름> <IP>:7443 <코드>`.
+## Use
 
-## 개발
+**On the PC to be controlled (the node)**
+
+```sh
+rcu init            # writes a policy with everything off; edit it (see examples/policy.toml)
+rcu policy-check
+rcu serve           # prints a pairing code; keep this terminal open — you approve requests here
+```
+
+**On the PC the agent runs on (the controller)**
+
+```sh
+rcu pair work-mac 100.101.102.103:7443 ABCD-1234
+rcu info work-mac
+rcu exec work-mac -- /usr/bin/git status
+rcu read work-mac /Users/me/work/notes.md
+echo "hello" | rcu write work-mac /Users/me/work/new.txt
+```
+
+Then just ask your agent: *"check git status on work-mac"*. The skill makes it use `rcu`, and you approve on the node.
+
+Output is always one JSON object. Exit codes: `0` ok · `2` denied by the node's policy · `3` waiting for your approval (`rcu wait`) · `4` auth · `5` can't reach the node. Details: [proto/errors.md](proto/errors.md).
+
+## Policy in 20 seconds
+
+```toml
+[capabilities]
+exec = true
+fs_read = true
+
+[fs]
+roots = ["~/work"]
+deny  = ["**/.env", "**/.ssh/**"]
+
+[[exec.allow]]
+program = "/usr/bin/git"      # absolute path; shells and wrappers (sh, cmd, env, sudo…) are refused
+args    = ["status", "*"]
+risk    = "read"              # read | write | destructive | external
+```
+
+Anything not listed is denied. Risk is decided by *your* policy, never by what the controller claims.
+
+## Cloud sessions as controller
+
+A cloud container can control your PCs if it joins your tailnet (`tailscaled --tun=userspace-networking`) and gets its token from an environment secret (`RCU_TOKEN_<NODE>`). Get the token yourself with `rcu pair … --print-token`. Proxy support (`RCU_PROXY`) is planned. See [DESIGN.md §17.8](DESIGN.md).
+
+## Limits you should know
+
+- Run `rcu serve` in a terminal for now; there is no background service or GUI approval yet.
+- Traffic is plain HTTP inside Tailscale's WireGuard tunnel. Restrict the port with Tailscale ACLs if your tailnet has other people.
+- An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell. Keep patterns narrow.
+- Windows: builds and runs, but path hardening against races is not done yet; treat Windows nodes as experimental.
+- Release binaries are not code-signed.
+
+## Develop
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). License: GPL-3.0-or-later ([LICENSE](LICENSE)).
