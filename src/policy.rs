@@ -372,6 +372,48 @@ fn base_name(program: &str) -> String {
     name
 }
 
+/// 윈도우에서 파일 이름으로 쓰면 위험한 것: NTFS 대체 데이터 스트림(`:`), 끝의 점·공백(무시되어 다른
+/// 파일로 해석됨), 장치 이름(CON, NUL, COM1 …, 확장자가 붙어도 장치), 8.3 짧은 이름 표기(`~1`).
+pub fn windows_name_unsafe(name: &str) -> bool {
+    if name.contains(':') || name.ends_with('.') || name.ends_with(' ') {
+        return true;
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return true;
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
+    const DEVICES: &[&str] = &["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    if DEVICES.contains(&stem.as_str()) {
+        return true;
+    }
+    for prefix in ["COM", "LPT"] {
+        if let Some(n) = stem.strip_prefix(prefix) {
+            if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0" {
+                return true;
+            }
+        }
+    }
+    // `PROGRA~1` 같은 짧은 이름: 정식 이름의 거부 규칙을 피하는 데 쓰일 수 있다.
+    if let Some(pos) = name.find('~') {
+        if name[pos + 1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn is_shell(program: &str) -> bool {
     let name = base_name(program);
     name.ends_with(".bat")
@@ -676,6 +718,13 @@ impl Policy {
             return Err(denied());
         }
         if path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(denied());
+        }
+        if cfg!(windows)
+            && path.components().any(
+                |c| matches!(c, Component::Normal(n) if windows_name_unsafe(&n.to_string_lossy())),
+            )
+        {
             return Err(denied());
         }
 

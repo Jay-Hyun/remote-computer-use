@@ -46,17 +46,50 @@ fn opened_path(file: &File) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn opened_path(file: &File) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    };
+    let handle = file.as_raw_handle();
+    let mut buf = vec![0u16; 1024];
+    loop {
+        // SAFETY: handle 은 열려 있는 파일이고 buf 는 길이만큼의 쓰기 가능한 버퍼다.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                handle,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if n == 0 {
+            return None;
+        }
+        if n >= buf.len() {
+            buf.resize(n + 1, 0);
+            continue;
+        }
+        return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])));
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn opened_path(_file: &File) -> Option<PathBuf> {
     None
 }
 
-/// 연 파일이 승인된 경로와 같은 파일인지. 리눅스·맥에서 확인 수단이 없으면(예: /proc 없음) 거부한다.
-/// 확인 수단이 없는 OS(윈도우, M4 예정)에서만 통과시킨다.
+/// 연 파일이 승인된 경로와 같은 파일인지. 확인 수단이 없으면(예: 리눅스에서 /proc 없음) 거부한다.
 fn verify_opened(file: &File, expected: &Path) -> bool {
     match opened_path(file) {
+        // 윈도우는 대소문자를 구분하지 않는다.
+        Some(actual) if cfg!(windows) => actual
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.to_string_lossy()),
         Some(actual) => actual == expected,
-        None => !cfg!(any(target_os = "linux", target_os = "macos")),
+        None => !cfg!(any(target_os = "linux", target_os = "macos", windows)),
     }
 }
 
@@ -72,13 +105,26 @@ fn safe_flags(_opts: &mut OpenOptions) {}
 
 /// 하드링크로 거부 패턴을 우회하는 것을 막는다: 링크가 둘 이상인 일반 파일은 건드리지 않는다.
 #[cfg(unix)]
-fn multiply_linked(meta: &std::fs::Metadata) -> bool {
+fn multiply_linked(_file: &File, meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     meta.nlink() > 1
 }
 
-#[cfg(not(unix))]
-fn multiply_linked(_meta: &std::fs::Metadata) -> bool {
+#[cfg(windows)]
+fn multiply_linked(file: &File, _meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: 구조체는 0 으로 초기화한 뒤 OS 가 채운다. handle 은 열려 있는 파일이다.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    // 확인하지 못하면 안전한 쪽(여러 링크가 있다고 보고 거부)으로.
+    ok == 0 || info.nNumberOfLinks > 1
+}
+
+#[cfg(not(any(unix, windows)))]
+fn multiply_linked(_file: &File, _meta: &std::fs::Metadata) -> bool {
     false
 }
 
@@ -113,7 +159,7 @@ pub fn read(policy: &Policy, raw: &str) -> Result<ReadOut, OpError> {
             "path is not a regular file",
         ));
     }
-    if multiply_linked(&meta) {
+    if multiply_linked(&file, &meta) {
         return Err(denied());
     }
     if meta.len() > policy.max_read_bytes {
@@ -269,7 +315,7 @@ pub fn write(
                 "path is not a regular file",
             ));
         }
-        if multiply_linked(&meta) {
+        if multiply_linked(&file, &meta) {
             return Err(denied());
         }
         backup = Some(make_backup(

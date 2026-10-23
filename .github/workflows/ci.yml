@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal -c clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service --test desktop --test screen_input
+      - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service --test desktop --test screen_input --test windows --test windows_names --test slowloris
 
   # Build rcu and run a real node + controller on this OS (loopback, approvals answered on stdin).
   smoke:

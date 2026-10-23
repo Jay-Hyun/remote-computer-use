@@ -36,6 +36,10 @@ const BODY_LIMIT: usize = 4 * 1024 * 1024;
 const PAIR_BODY_LIMIT: usize = 4 * 1024;
 /// 동시에 열려 있는 연결(요청) 수 상한.
 const MAX_IN_FLIGHT: usize = 128;
+/// 요청 헤더를 다 받아야 하는 기본 시간.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// 동시에 열어 두는 연결 수 상한. 넘으면 나머지는 운영체제 대기열에서 기다린다.
+const MAX_CONNECTIONS: usize = 256;
 /// 인증에 실패한 출처(IP)가 분당 보낼 수 있는 요청 수.
 const PRE_AUTH_PER_MINUTE: u32 = 30;
 
@@ -56,6 +60,8 @@ pub struct AppState {
     auth_fail_log: Mutex<(Instant, u64)>,
     /// 한 HTTP 요청이 승인을 기다리는 최대 시간. 넘기면 202 + approval_id.
     pub http_wait: Duration,
+    /// 연결을 연 뒤 요청 헤더를 다 보내야 하는 시간. 천천히 보내며 연결을 붙잡는 상대(slowloris)를 끊는다.
+    pub header_timeout: Duration,
 }
 
 impl AppState {
@@ -76,6 +82,7 @@ impl AppState {
             pre_auth: Limiter::new(PRE_AUTH_PER_MINUTE, u32::MAX),
             auth_fail_log: Mutex::new((Instant::now() - Duration::from_secs(10), 0)),
             http_wait,
+            header_timeout: HEADER_TIMEOUT,
         }
     }
 }
@@ -133,11 +140,46 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> s
             watcher.gate.drop_revoked(|id| tokens.exists(id));
         }
     });
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
+    let header_timeout = state.header_timeout;
+    let mut make_service = router(state).into_make_service_with_connect_info::<SocketAddr>();
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    loop {
+        // 연결 수가 가득 차면 새 연결을 받지 않는다.
+        let permit = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .map_err(std::io::Error::other)?;
+        let (socket, remote) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // 파일 기술자 부족 같은 일시적 오류에서 바쁘게 도는 것을 막는다.
+                eprintln!("accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let service = match tower::Service::call(&mut make_service, remote).await {
+            Ok(svc) => svc,
+            Err(never) => match never {},
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            let hyper_service = hyper::service::service_fn(
+                move |req: axum::http::Request<hyper::body::Incoming>| {
+                    tower::Service::call(&mut service.clone(), req)
+                },
+            );
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            builder
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(header_timeout);
+            let _ = builder
+                .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(socket), hyper_service)
+                .await;
+        });
+    }
 }
 
 fn random_id() -> String {

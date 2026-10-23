@@ -43,6 +43,15 @@ jobs:
           fi
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Never publish a binary that cannot run a real node + controller on its own platform.
+      # (The Intel macOS build is cross-compiled on an Apple-silicon runner, so it is not run here.)
+      - name: smoke test the release binary (unix)
+        if: runner.os != 'Windows' && matrix.target != 'x86_64-apple-darwin'
+        run: bash scripts/smoke.sh target/${{ matrix.target }}/release/rcu
+      - name: smoke test the release binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke.ps1 target/${{ matrix.target }}/release/rcu.exe
       - name: package (unix)
         if: matrix.ext == 'tar.gz'
         run: |

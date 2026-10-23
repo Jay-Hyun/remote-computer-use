@@ -1,0 +1,23 @@
+name: audit
+
+# Checks dependencies against the RustSec advisory database: when Cargo.lock changes, weekly, or on demand.
+on:
+  push:
+    paths: ["Cargo.lock", "Cargo.toml", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
