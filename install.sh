@@ -83,7 +83,9 @@ main() {
 
   # Extract only the binary and refuse anything that is not a plain file.
   tar -xzf "$tmp/$asset" -C "$tmp" rcu
-  [ -f "$tmp/rcu" ] && [ ! -L "$tmp/rcu" ] || die "archive did not contain a regular file named rcu"
+  if [ ! -f "$tmp/rcu" ] || [ -L "$tmp/rcu" ]; then
+    die "archive did not contain a regular file named rcu"
+  fi
   mkdir -p "$DEST"
   install -m 755 "$tmp/rcu" "$DEST/rcu"
   say "Installed $DEST/rcu"

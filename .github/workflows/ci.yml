@@ -44,6 +44,28 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service --test desktop --test screen_input
 
+  # Build rcu and run a real node + controller on this OS (loopback, approvals answered on stdin).
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo build --locked
+      - name: smoke (unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/smoke.sh target/debug/rcu
+      - name: smoke (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke.ps1 target/debug/rcu.exe
+
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -51,7 +73,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck install.sh scripts/install-codex-skill.sh
+        run: shellcheck -S warning install.sh scripts/install-codex-skill.sh scripts/smoke.sh
       - name: plugin manifests are valid JSON
         run: |
           for f in .claude-plugin/marketplace.json plugin/.claude-plugin/plugin.json proto/*.json; do
