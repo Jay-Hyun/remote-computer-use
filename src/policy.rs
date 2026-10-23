@@ -452,6 +452,7 @@ fn canonical_prefix_variant(pat: &str) -> Option<String> {
     }
     let real = std::fs::canonicalize(dir).ok()?;
     let real = real.to_string_lossy().replace('\\', "/");
+    let real = real.strip_prefix("//?/").unwrap_or(&real).to_string();
     (real != dir).then(|| format!("{real}{rest}"))
 }
 
@@ -524,6 +525,8 @@ impl Policy {
         }
         for pat in &raw.fs.deny {
             let pat = expand_home(pat).replace('\\', "/");
+            // 윈도우의 `\\?\` 접두어는 검사 대상 경로에서도 떼므로 패턴에서도 뗀다.
+            let pat = pat.strip_prefix("//?/").unwrap_or(&pat).to_string();
             if pat.starts_with('~') {
                 anyhow::bail!("fs.deny: cannot expand ~ in \"{pat}\"");
             }
