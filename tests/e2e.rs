@@ -1,3 +1,5 @@
+#![cfg(unix)] // Windows 경로 시험은 M4 에서 옮긴다
+
 use rcu::audit::Audit;
 use rcu::client;
 use rcu::pairing::Pairing;
@@ -471,4 +473,47 @@ fn cli_exec_read_write_with_terminal_approval() {
     );
 
     drop(serve);
+}
+
+#[test]
+fn init_creates_safe_policy_once_and_never_overwrites() {
+    let home = tempfile::tempdir().unwrap();
+    let out = rcu(home.path()).arg("init").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["created"], true);
+    let path = home.path().join("policy.toml");
+    assert!(path.exists());
+
+    // 만들어진 기본 정책은 유효하고 능력이 모두 꺼져 있다.
+    let out = rcu(home.path()).arg("policy-check").output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["capabilities"], serde_json::json!(["info"]));
+
+    // 사용자가 고친 파일은 다시 init 해도 그대로.
+    std::fs::write(&path, "[capabilities]\nfs_read = true\n").unwrap();
+    let out = rcu(home.path()).arg("init").output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["created"], false);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[capabilities]\nfs_read = true\n"
+    );
+}
+
+#[test]
+fn serve_without_bind_and_without_tailscale_explains_itself() {
+    let home = tempfile::tempdir().unwrap();
+    // 시험 환경에 tailscale 이 없을 때만 의미가 있다.
+    if rcu::bind::detect_tailnet_ip().is_some() {
+        return;
+    }
+    let out = rcu(home.path()).arg("serve").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("Tailscale") && msg.contains("--bind 127.0.0.1:7443"),
+        "{msg}"
+    );
 }

@@ -1,3 +1,5 @@
+#![cfg(unix)] // Windows 경로 시험은 M4 에서 옮긴다
+
 use rcu::policy::{Access, Code, Policy, Risk};
 use std::fs;
 

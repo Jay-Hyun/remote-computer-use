@@ -1,8 +1,13 @@
 [package]
 name = "rcu"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/Jay-Hyun/remote-computer-use"
+readme = "README.md"
+keywords = ["remote", "tailscale", "agent", "cli"]
+categories = ["command-line-utilities"]
+rust-version = "1.82"
 description = "remote-computer-use: node agent and controller CLI"
 
 [lib]
@@ -28,7 +33,7 @@ subtle = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 toml = "0.8"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -39,3 +44,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

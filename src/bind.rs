@@ -30,3 +30,36 @@ pub fn check_ip(ip: IpAddr) -> anyhow::Result<()> {
         )
     }
 }
+
+/// `tailscale ip -4` 출력에서 첫 IPv4 주소를 꺼낸다. 허용 대역이 아니면 None.
+pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().parse::<IpAddr>().ok())
+        .find(|ip| matches!(ip, IpAddr::V4(v4) if in_cgnat(*v4)))
+}
+
+/// 이 PC 의 테일스케일 IPv4 를 찾는다. CLI 가 없거나 켜져 있지 않으면 None.
+pub fn detect_tailnet_ip() -> Option<IpAddr> {
+    const CANDIDATES: &[&str] = &[
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "C:\\Program Files\\Tailscale\\tailscale.exe",
+    ];
+    for bin in CANDIDATES {
+        let Ok(out) = std::process::Command::new(bin)
+            .args(["ip", "-4"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        if out.status.success() {
+            if let Some(ip) = parse_tailscale_ip(&String::from_utf8_lossy(&out.stdout)) {
+                return Some(ip);
+            }
+        }
+    }
+    None
+}

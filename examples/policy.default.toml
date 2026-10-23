@@ -1,0 +1,21 @@
+# rcu 노드 정책. `rcu init` 이 만든 기본 파일: 모든 능력이 꺼져 있다.
+# 필요한 것만 주석을 풀어 켜고, `rcu policy-check` 로 검사한다.
+# 자세한 예: examples/policy.toml
+
+[node]
+# name = "my-mac"
+
+[capabilities]
+exec = false
+fs_read = false
+fs_write = false
+
+# [fs]
+# roots = ["~/work"]
+# deny = ["**/.env", "**/.ssh/**"]
+
+# 셸·래퍼는 넣을 수 없다. 절대 경로 + 좁은 인자 패턴.
+# [[exec.allow]]
+# program = "/usr/bin/git"
+# args = ["status", "*"]
+# risk = "read"

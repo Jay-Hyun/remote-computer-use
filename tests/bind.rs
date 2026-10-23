@@ -38,3 +38,21 @@ fn everything_else_is_denied() {
         assert!(!is_allowed_ip(ip(a)), "{a}");
     }
 }
+
+#[test]
+fn parses_tailscale_ip_output() {
+    use rcu::bind::parse_tailscale_ip;
+    assert_eq!(
+        parse_tailscale_ip("100.101.102.103\n"),
+        Some(ip("100.101.102.103"))
+    );
+    assert_eq!(
+        parse_tailscale_ip("\n  100.64.0.7  \n100.64.0.8\n"),
+        Some(ip("100.64.0.7"))
+    );
+    // 허용 대역이 아니거나 이상한 출력은 쓰지 않는다.
+    assert_eq!(parse_tailscale_ip("192.168.1.2\n"), None);
+    assert_eq!(parse_tailscale_ip("not an ip\n"), None);
+    assert_eq!(parse_tailscale_ip(""), None);
+    assert_eq!(parse_tailscale_ip("fd7a:115c:a1e0::1\n"), None); // -4 출력만 쓴다
+}

@@ -1,3 +1,5 @@
+#![cfg(unix)] // Windows 경로 시험은 M4 에서 옮긴다
+
 //! M2: exec / fs / 승인 / 그랜트 / 속도 제한을 루프백 서버로 검사한다.
 
 use rcu::approval::Decision;

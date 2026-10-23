@@ -32,11 +32,14 @@ struct Cli {
 enum Cmd {
     /// (노드) 에이전트를 켠다. 루프백 또는 테일스케일 주소에서만 듣는다.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:7443")]
-        bind: String,
+        /// ip:port. 생략하면 이 PC 의 테일스케일 주소(`tailscale ip -4`):7443 을 쓴다.
+        #[arg(long)]
+        bind: Option<String>,
         #[arg(long)]
         policy: Option<PathBuf>,
     },
+    /// (노드) 안전한 기본 정책 파일(모든 능력 꺼짐)을 만든다. 이미 있으면 건드리지 않는다.
+    Init,
     /// (노드) 발급한 토큰을 모두 폐기한다.
     Revoke {
         #[arg(long)]
@@ -101,7 +104,8 @@ fn fail(err: &ClientError) -> ! {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Cmd::Serve { bind, policy } => serve(&bind, policy),
+        Cmd::Serve { bind, policy } => serve(bind, policy),
+        Cmd::Init => init(),
         Cmd::Revoke { all } => revoke(all),
         Cmd::PolicyCheck { policy } => policy_check(policy),
         Cmd::Pair {
@@ -129,9 +133,48 @@ fn main() {
     }
 }
 
-fn serve(bind: &str, policy: Option<PathBuf>) -> anyhow::Result<()> {
-    let addr: SocketAddr = bind.parse().context("--bind must be ip:port")?;
-    rcu::bind::check_ip(addr.ip())?;
+const DEFAULT_PORT: u16 = 7443;
+
+fn resolve_bind(bind: Option<String>) -> anyhow::Result<SocketAddr> {
+    match bind {
+        Some(b) => {
+            let addr: SocketAddr = b.parse().context("--bind must be ip:port")?;
+            rcu::bind::check_ip(addr.ip())?;
+            Ok(addr)
+        }
+        None => match rcu::bind::detect_tailnet_ip() {
+            Some(ip) => Ok(SocketAddr::new(ip, DEFAULT_PORT)),
+            None => anyhow::bail!(
+                "could not find this PC's Tailscale address (is Tailscale installed and logged in?). \
+                 Install/log in to Tailscale, or test locally with --bind 127.0.0.1:{DEFAULT_PORT}"
+            ),
+        },
+    }
+}
+
+fn init() -> anyhow::Result<()> {
+    let path = config::policy_path()?;
+    let created = !path.exists();
+    if created {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, include_str!("../examples/policy.default.toml"))?;
+    }
+    print(json!({
+        "policy": path,
+        "created": created,
+        "next": [
+            "edit the policy file to turn on only what you need (everything is off by default)",
+            "rcu policy-check",
+            "rcu serve   (prints a pairing code; keep this terminal open to approve requests)"
+        ]
+    }));
+    Ok(())
+}
+
+fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
+    let addr = resolve_bind(bind)?;
 
     let policy_path = match policy {
         Some(p) => p,
