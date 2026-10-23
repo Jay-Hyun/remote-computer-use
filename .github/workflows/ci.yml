@@ -65,6 +65,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/smoke.ps1 target/debug/rcu.exe
+      # Real OS tools (screen capture, input, approval dialog). There is no human or granted permission on a
+      # runner, so this only reports what happens; it never fails the build.
+      - name: desktop probe
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        env:
+          RCU_REAL_DESKTOP: "1"
+        run: cargo test --locked --test desktop_real -- --nocapture
 
   scripts:
     runs-on: ubuntu-latest
