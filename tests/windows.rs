@@ -98,14 +98,20 @@ fn builtin_and_custom_deny_globs_work_on_windows_paths() {
     fs::write(root.join(".SSH").join("id_rsa"), "k").unwrap();
     fs::create_dir_all(root.join("private")).unwrap();
     fs::write(root.join("private").join("x.txt"), "x").unwrap();
-    let pattern = format!("{}/private/**", root.to_string_lossy().replace('\\', "/"));
-    let p = policy(&root, &format!("deny = ['{pattern}']"));
-    assert!(denied(&p, &root.join(".SSH").join("id_rsa"), Access::Read));
-    assert!(denied(
-        &p,
-        &root.join("private").join("x.txt"),
-        Access::Read
-    ));
+    let verbatim = format!("{}/private/**", root.to_string_lossy().replace('\\', "/"));
+    // 사용자는 보통 `\\?\` 없이 쓴다. 두 형태 모두 같은 파일을 막아야 한다.
+    let plain = verbatim.trim_start_matches("//?/").to_string();
+    for pattern in [verbatim, plain] {
+        let p = policy(&root, &format!("deny = ['{pattern}']"));
+        assert!(
+            denied(&p, &root.join(".SSH").join("id_rsa"), Access::Read),
+            "{pattern}"
+        );
+        assert!(
+            denied(&p, &root.join("private").join("x.txt"), Access::Read),
+            "{pattern}"
+        );
+    }
 }
 
 #[test]
