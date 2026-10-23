@@ -91,7 +91,7 @@ A cloud container can control your PCs if it joins your tailnet (`tailscaled --t
 - Traffic is plain HTTP inside Tailscale's WireGuard tunnel. Restrict the port with Tailscale ACLs if your tailnet has other people.
 - An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell, and exec arguments are not checked against `fs.roots`. Keep patterns narrow; `rcu policy-check` warns about risky entries.
 - Windows: builds and runs, but path hardening against races is not done yet; treat Windows nodes as experimental.
-- Screen and input are best-effort on macOS/Windows (they use `screencapture`/`osascript`/PowerShell and need the usual OS permissions) and unsupported on Linux. A controller with `input` can press any button on the node's screen, including approval windows, so only enable it on nodes whose users read each prompt.
+- Screen and input use `screencapture`/`osascript`/PowerShell, need the usual OS permissions (macOS: Screen Recording, Accessibility), and are unsupported on Linux. The tools are exercised on real macOS and Windows CI runners; dialog appearance and permission prompts still need a human check. A controller with `input` can press any button on the node's screen, including approval windows, so only enable it on nodes whose users read each prompt.
 - Release binaries are not code-signed.
 
 ## Develop

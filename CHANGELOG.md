@@ -2,7 +2,7 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer (0.x: breaking changes possible).
 
-## [Unreleased]
+## [0.3.0]
 
 ### Added
 - `rcu doctor`: one-shot health check of the node and controller sides with a suggested fix for each problem.
@@ -13,9 +13,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer 
 - Release workflow smoke-tests each binary on its own platform before publishing; weekly `cargo audit`.
 - CI runs on every branch push, with a real node/controller smoke test (`scripts/smoke.sh`, `scripts/smoke.ps1`) on Linux, macOS and Windows runners.
 
-## [0.3.0]
-
-### Added
+### Added (screen and input)
 - Screen capture and input (off by default): `rcu screen --out`, `rcu click`, `rcu type`, `rcu key`; policy `capabilities.screen/input`, `[screen] max_width, grant`, `[input] max_text`, `limits.input_per_minute`. Capture is approved every time unless `screen.grant = true`; input is always approved one action at a time. macOS (`screencapture`, `osascript`, optional `cliclick`) and Windows (PowerShell) backends; Linux reports `UNSUPPORTED`. Typed text and images are never logged or written to the node's disk.
 
 ### Security (from an independent code review)
