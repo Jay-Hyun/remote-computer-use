@@ -8,6 +8,8 @@ name = "mac-home"
 exec = true
 fs_read = true
 fs_write = false
+screen = false   # 화면 캡처(스크린샷을 컨트롤러로 보냄). 켜면 매번 승인
+input = false    # 클릭·타이핑·키. 켜면 항상 매번 승인, 분당 20회
 
 [fs]
 roots = ["~/work"]

@@ -27,4 +27,12 @@ CLI는 같은 객체를 `{"error": {...}}`로 감싸 stdout에 내보낸다.
 | RATE_LIMITED | 429 | 1 | 분당 또는 일일 호출 상한 |
 | BAD_REQUEST | 400 | 1 | 본문 형식 오류 |
 | IO_ERROR | 500 | 1 | 파일 작업 실패 |
+| STATE_CHANGED | 409 | 1 | 승인을 기다리는 사이 대상이 바뀌어 위험도가 올라감. 다시 요청 |
+| AUDIT_FAILED | 500 | 1 | 노드가 감사 로그를 쓰지 못해 실행을 거부 |
+| BUSY | 429 | 1 | 승인 대기가 너무 많거나 동시 실행이 가득 참 |
+| UNSUPPORTED | 501 | 1 | 이 OS 노드는 화면·입력을 지원하지 않음(또는 맥 우클릭에 `cliclick` 필요) |
+| SCREEN_FAILED | 500 | 1 | 화면 캡처 도구 실패(권한? 로그인 세션 없음?) |
+| INPUT_FAILED | 500 | 1 | 입력 도구 실패(권한? 로그인 세션 없음?) |
+| BAD_NODE_NAME | - | 1 | 노드 이름은 소문자·숫자·하이픈 |
+| PROXY_DENIED | - | 2 | `RCU_PROXY` 가 이 PC 의 SOCKS5 가 아님(클라이언트 전용) |
 | INTERNAL | 500 | 1 | 그 밖 |

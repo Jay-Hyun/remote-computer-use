@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal -c clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service
+      - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service --test desktop --test screen_input
 
   scripts:
     runs-on: ubuntu-latest

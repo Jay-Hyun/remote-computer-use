@@ -235,3 +235,60 @@ pub fn wait(addr: &str, token: &str, approval_id: &str) -> Result<Value, ClientE
             .call(),
     )
 }
+
+pub fn screen(addr: &str, token: &str) -> Result<Value, ClientError> {
+    post(addr, token, "/v1/screen/capture", json!({}))
+}
+
+pub fn click(addr: &str, token: &str, x: i32, y: i32, button: &str) -> Result<Value, ClientError> {
+    post(
+        addr,
+        token,
+        "/v1/input/click",
+        json!({ "x": x, "y": y, "button": button }),
+    )
+}
+
+pub fn type_text(addr: &str, token: &str, text: &str) -> Result<Value, ClientError> {
+    post(addr, token, "/v1/input/type", json!({ "text": text }))
+}
+
+pub fn key(addr: &str, token: &str, combo: &str) -> Result<Value, ClientError> {
+    post(addr, token, "/v1/input/key", json!({ "combo": combo }))
+}
+
+/// 결과에 스크린샷(`png_b64`)이 있으면 파일로 저장하고 큰 base64 는 결과에서 뺀다(에이전트 문맥을 지키려고).
+/// `out` 이 없으면 저장하지 않고 이미지는 버린다.
+pub fn save_screenshot(
+    mut value: Value,
+    out: Option<&std::path::Path>,
+) -> Result<Value, ClientError> {
+    use base64::Engine;
+    let Some(b64) = value
+        .get("png_b64")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+    else {
+        return Ok(value);
+    };
+    let obj = value.as_object_mut().expect("object");
+    obj.remove("png_b64");
+    match out {
+        Some(path) => {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|_| ClientError::new("NETWORK_ERROR", "bad screenshot data from node"))?;
+            std::fs::write(path, &png)
+                .map_err(|_| ClientError::new("INTERNAL", "could not write the screenshot file"))?;
+            obj.insert("saved".into(), json!(path));
+            obj.insert("bytes".into(), json!(png.len()));
+        }
+        None => {
+            obj.insert(
+                "note".into(),
+                json!("screenshot discarded; run again with --out <file.png>"),
+            );
+        }
+    }
+    Ok(value)
+}

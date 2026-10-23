@@ -85,11 +85,36 @@ enum Cmd {
         #[arg(long)]
         overwrite: bool,
     },
+    /// (컨트롤러) 노드 화면을 PNG 로 저장한다. 이미지는 `--out` 파일에만 저장되고 출력에는 크기만 나온다.
+    Screen {
+        node: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// (컨트롤러) 노드 화면의 좌표를 클릭한다(노드 화면 좌표계: 출력의 screen_width/height 기준).
+    Click {
+        node: String,
+        x: i32,
+        y: i32,
+        #[arg(long, default_value = "left")]
+        button: String,
+    },
+    /// (컨트롤러) 노드에서 글자를 입력한다. 글자는 인자로 주거나 생략하고 표준 입력으로 준다.
+    Type {
+        node: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+    },
+    /// (컨트롤러) 노드에서 키 조합을 누른다. 예: ctrl+c, enter, cmd+space
+    Key { node: String, combo: String },
     /// (컨트롤러) 승인 대기 중이던 요청의 결과를 기다린다(최대 60초). 같은 요청을 다시 보내지 말 것.
     Wait {
         approval_id: String,
         #[arg(long)]
         node: String,
+        /// 대기하던 요청이 스크린샷이면 저장할 PNG 경로.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// (컨트롤러) 등록된 노드 목록.
     Nodes,
@@ -143,7 +168,15 @@ fn main() {
             path,
             overwrite,
         } => write(&node, &path, overwrite),
-        Cmd::Wait { approval_id, node } => wait(&node, &approval_id),
+        Cmd::Wait {
+            approval_id,
+            node,
+            out,
+        } => wait(&node, &approval_id, out.as_deref()),
+        Cmd::Screen { node, out } => screen(&node, &out),
+        Cmd::Click { node, x, y, button } => click(&node, x, y, &button),
+        Cmd::Type { node, text } => type_text(&node, &text),
+        Cmd::Key { node, combo } => key(&node, &combo),
         Cmd::Nodes => nodes(),
     };
     if let Err(e) = result {
@@ -546,9 +579,42 @@ fn write(node: &str, path: &str, overwrite: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn wait(node: &str, approval_id: &str) -> anyhow::Result<()> {
+fn wait(node: &str, approval_id: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
     let (addr, token) = node_and_token(node)?;
-    print(with_text(rcu::client::wait(&addr, &token, approval_id)?));
+    let value = rcu::client::wait(&addr, &token, approval_id)?;
+    print(with_text(rcu::client::save_screenshot(value, out)?));
+    Ok(())
+}
+
+fn screen(node: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    let value = rcu::client::screen(&addr, &token)?;
+    print(rcu::client::save_screenshot(value, Some(out))?);
+    Ok(())
+}
+
+fn click(node: &str, x: i32, y: i32, button: &str) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    print(rcu::client::click(&addr, &token, x, y, button)?);
+    Ok(())
+}
+
+fn type_text(node: &str, text: &[String]) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    let text = if text.is_empty() {
+        let mut buf = String::new();
+        std::io::stdin().take(64 * 1024).read_to_string(&mut buf)?;
+        buf.trim_end_matches('\n').to_string()
+    } else {
+        text.join(" ")
+    };
+    print(rcu::client::type_text(&addr, &token, &text)?);
+    Ok(())
+}
+
+fn key(node: &str, combo: &str) -> anyhow::Result<()> {
+    let (addr, token) = node_and_token(node)?;
+    print(rcu::client::key(&addr, &token, combo)?);
     Ok(())
 }
 

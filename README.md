@@ -7,7 +7,7 @@ Let an AI session (Claude Code, Codex, or a cloud session) run commands and read
 - **Tailscale only.** The node refuses to listen on anything but loopback or your tailnet, and the controller refuses to send credentials anywhere else.
 - **The node is in charge.** Default deny. A policy file lists the exact programs, folders and sizes allowed. The first request of each kind — and every overwrite or destructive command — waits for a human `y`/`n` in the node's terminal.
 
-Status: **v0.2** — commands, files, approvals. Screen capture and input are planned. See [DESIGN.md](DESIGN.md) (Korean) and [SECURITY.md](SECURITY.md).
+Status: **v0.3** — commands, files, approvals, and (off by default) screen capture and input. See [DESIGN.md](DESIGN.md) (Korean) and [SECURITY.md](SECURITY.md).
 
 [한국어 README](README.ko.md)
 
@@ -51,6 +51,8 @@ rcu pair work-mac 100.101.102.103:7443 ABCD-1234   # node names: lowercase lette
 rcu info work-mac
 rcu exec work-mac -- /usr/bin/git status
 rcu read work-mac /Users/me/work/notes.md
+rcu screen work-mac --out /tmp/shot.png      # needs `screen = true` in the node's policy
+rcu click work-mac 640 360                    # needs `input = true`; the node approves each action
 echo "hello" | rcu write work-mac /Users/me/work/new.txt
 ```
 
@@ -87,6 +89,7 @@ A cloud container can control your PCs if it joins your tailnet (`tailscaled --t
 - Traffic is plain HTTP inside Tailscale's WireGuard tunnel. Restrict the port with Tailscale ACLs if your tailnet has other people.
 - An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell, and exec arguments are not checked against `fs.roots`. Keep patterns narrow; `rcu policy-check` warns about risky entries.
 - Windows: builds and runs, but path hardening against races is not done yet; treat Windows nodes as experimental.
+- Screen and input are best-effort on macOS/Windows (they use `screencapture`/`osascript`/PowerShell and need the usual OS permissions) and unsupported on Linux. A controller with `input` can press any button on the node's screen, including approval windows, so only enable it on nodes whose users read each prompt.
 - Release binaries are not code-signed.
 
 ## Develop

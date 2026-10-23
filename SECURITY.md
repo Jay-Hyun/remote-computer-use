@@ -22,7 +22,9 @@ A node lets another machine you own run a **narrow, allow-listed** set of comman
 | Path tricks | Absolute paths only, `..` rejected, symlinks resolved then checked against roots and deny globs, `O_NOFOLLOW` and opened-path verification (Linux/macOS) |
 | Runaway use | Per-token per-minute and per-node daily caps; command timeout and output caps |
 | Secrets in logs | Tokens are redacted; audit log never stores file contents or command output |
-| Terminal spoofing via request text | Approval prompts strip control characters and truncate |
+| Terminal spoofing via request text | Approval prompts quote arguments, show invisible/bidi characters as `\u{..}`, never truncate, and refuse over-long requests |
+| Instructions shown on the node's screen (screen capture) | The skill treats screen content as data; screenshots are returned only to the requesting controller and are never written to the node's disk or logs; capture is approved each time by default |
+| Input used to press the node's own approval buttons | Every input action needs its own approval, prompts warn that input can press other approval windows, and `input` is off by default; the residual risk is a human approving a click they do not understand |
 
 ## Known limits (not vulnerabilities)
 

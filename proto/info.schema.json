@@ -10,7 +10,7 @@
     "version": { "type": "string" },
     "capabilities": {
       "type": "array",
-      "items": { "enum": ["info", "exec", "fs.read", "fs.write"] }
+      "items": { "enum": ["info", "exec", "fs.read", "fs.write", "screen", "input"] }
     }
   }
 }

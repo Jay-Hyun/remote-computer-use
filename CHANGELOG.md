@@ -2,7 +2,10 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer (0.x: breaking changes possible).
 
-## [Unreleased]
+## [0.3.0]
+
+### Added
+- Screen capture and input (off by default): `rcu screen --out`, `rcu click`, `rcu type`, `rcu key`; policy `capabilities.screen/input`, `[screen] max_width, grant`, `[input] max_text`, `limits.input_per_minute`. Capture is approved every time unless `screen.grant = true`; input is always approved one action at a time. macOS (`screencapture`, `osascript`, optional `cliclick`) and Windows (PowerShell) backends; Linux reports `UNSUPPORTED`. Typed text and images are never logged or written to the node's disk.
 
 ### Security (from an independent code review)
 - An approval is bound to the risk that was shown: if the target changed while waiting (e.g. a file appeared so "create" became "overwrite"), the request is refused with `STATE_CHANGED`.

@@ -228,3 +228,13 @@ fn zenity_text_cannot_gain_fake_lines_from_backslash_escapes() {
     assert!(text.contains("\\\\nread"), "{text:?}");
     assert!(!text.contains("x \\nread"), "{text:?}");
 }
+
+#[test]
+fn input_prompts_warn_that_input_can_press_other_approval_windows() {
+    let mut i = info(Risk::External, "mouse click (1, 2), left button");
+    i.capability = "input".into();
+    assert!(prompt_for(&i, 60).body.contains("other approval windows"));
+    assert!(!prompt_for(&info(Risk::Read, "x"), 60)
+        .body
+        .contains("approval windows"));
+}

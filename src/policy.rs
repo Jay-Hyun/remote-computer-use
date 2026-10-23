@@ -110,6 +110,37 @@ struct RawPolicy {
     exec: RawExec,
     limits: RawLimits,
     approval: RawApproval,
+    screen: RawScreen,
+    input: RawInput,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RawScreen {
+    max_width: u32,
+    /// true 면 캡처도 기간 승인(그랜트)이 가능하다. 기본은 매번 묻는다(화면에는 비밀이 있을 수 있다).
+    grant: bool,
+}
+
+impl Default for RawScreen {
+    fn default() -> Self {
+        RawScreen {
+            max_width: 1280,
+            grant: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RawInput {
+    max_text: usize,
+}
+
+impl Default for RawInput {
+    fn default() -> Self {
+        RawInput { max_text: 500 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +148,7 @@ struct RawPolicy {
 struct RawLimits {
     per_minute: u32,
     per_day: u32,
+    input_per_minute: u32,
 }
 
 impl Default for RawLimits {
@@ -124,6 +156,7 @@ impl Default for RawLimits {
         RawLimits {
             per_minute: 60,
             per_day: 2000,
+            input_per_minute: 20,
         }
     }
 }
@@ -158,6 +191,8 @@ struct RawCaps {
     exec: bool,
     fs_read: bool,
     fs_write: bool,
+    screen: bool,
+    input: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,6 +260,13 @@ pub struct Policy {
     pub exec_max_output_bytes: usize,
     pub rate_per_minute: u32,
     pub daily_cap: u32,
+    pub input_per_minute: u32,
+    pub screen_enabled: bool,
+    pub input_enabled: bool,
+    /// 캡처가 이미지 폭을 이 값으로 줄여 돌려준다.
+    pub screen_max_width: u32,
+    pub screen_grant: bool,
+    pub input_max_text: usize,
     pub grant_minutes: u64,
     /// 한 HTTP 요청이 승인을 기다리는 시간. 넘기면 202 + approval_id.
     pub http_wait_secs: u64,
@@ -473,6 +515,12 @@ impl Policy {
             exec_max_output_bytes: raw.exec.max_output_bytes.clamp(1024, 4 * 1024 * 1024),
             rate_per_minute: raw.limits.per_minute.max(1),
             daily_cap: raw.limits.per_day.max(1),
+            input_per_minute: raw.limits.input_per_minute.max(1),
+            screen_enabled: raw.capabilities.screen,
+            input_enabled: raw.capabilities.input,
+            screen_max_width: raw.screen.max_width.clamp(320, 7680),
+            screen_grant: raw.screen.grant,
+            input_max_text: raw.input.max_text.clamp(1, 5000),
             grant_minutes: raw.approval.grant_minutes.clamp(1, 24 * 60),
             http_wait_secs: raw.approval.http_wait_secs.clamp(1, 120),
             approval_ui: match raw.approval.ui.as_str() {
@@ -500,7 +548,32 @@ impl Policy {
         if self.fs_write_enabled {
             caps.push("fs.write");
         }
+        if self.screen_enabled {
+            caps.push("screen");
+        }
+        if self.input_enabled {
+            caps.push("input");
+        }
         caps
+    }
+
+    pub fn check_screen(&self) -> Result<(), PolicyError> {
+        if self.screen_enabled {
+            Ok(())
+        } else {
+            Err(deny(
+                Code::CapabilityOff,
+                "screen capture is off on this node",
+            ))
+        }
+    }
+
+    pub fn check_input(&self) -> Result<(), PolicyError> {
+        if self.input_enabled {
+            Ok(())
+        } else {
+            Err(deny(Code::CapabilityOff, "input is off on this node"))
+        }
     }
 
     /// 노드 자신의 설정·상태 위치(정책, 토큰 해시, 감사 로그, 페어링 파일)는 허용 루트가 덮고 있어도

@@ -1,5 +1,6 @@
 //! 노드가 실행하는 작업: 계획(정책 검사·위험도), 실행, 오류 타입.
 
+use crate::desktop::{self, Button, Desktop, SystemDesktop};
 use crate::policy::{Access, Policy, PolicyError, Risk};
 use crate::{exec, fsops};
 use serde_json::{json, Value};
@@ -52,6 +53,18 @@ pub enum Op {
         path: String,
         data: Vec<u8>,
         overwrite: bool,
+    },
+    Screen,
+    Click {
+        x: i32,
+        y: i32,
+        button: Button,
+    },
+    Type {
+        text: String,
+    },
+    Key {
+        combo: String,
     },
 }
 
@@ -115,6 +128,59 @@ pub fn plan(policy: &Policy, op: &Op) -> Result<Plan, OpError> {
                 summary: describe(op, Some(&resolved.path), Some(risk)),
             }
         }
+        Op::Screen => {
+            policy.check_screen()?;
+            Plan {
+                capability: "screen",
+                // 캡처를 기간 승인으로 허용할지는 정책이 정한다. 아니면 매번 묻는 위험도로 취급한다.
+                risk: if policy.screen_grant {
+                    Risk::Read
+                } else {
+                    Risk::External
+                },
+                target: "screen capture".to_string(),
+                summary: describe(op, None, None),
+            }
+        }
+        Op::Click { x, y, button } => {
+            policy.check_input()?;
+            if !(0..=100_000).contains(x) || !(0..=100_000).contains(y) {
+                return Err(OpError::new(
+                    400,
+                    "BAD_REQUEST",
+                    "click coordinates are out of range",
+                ));
+            }
+            Plan {
+                capability: "input",
+                risk: Risk::External,
+                target: format!("click {x},{y} {}", button.as_str()),
+                summary: describe(op, None, None),
+            }
+        }
+        Op::Type { text } => {
+            policy.check_input()?;
+            desktop::check_typed_text(text, policy.input_max_text)
+                .map_err(|m| OpError::new(400, "BAD_REQUEST", m))?;
+            Plan {
+                capability: "input",
+                risk: Risk::External,
+                // 감사 로그에는 입력한 글자 수만 남긴다(비밀번호일 수 있다).
+                target: format!("type {} chars", text.chars().count()),
+                summary: describe(op, None, None),
+            }
+        }
+        Op::Key { combo } => {
+            policy.check_input()?;
+            let parsed = desktop::parse_combo(combo)
+                .map_err(|_| OpError::new(400, "BAD_REQUEST", "unknown key or modifier"))?;
+            Plan {
+                capability: "input",
+                risk: Risk::External,
+                target: format!("key {}", parsed.display()),
+                summary: describe(op, None, None),
+            }
+        }
     };
     if plan.summary.chars().count() > MAX_SUMMARY_CHARS {
         return Err(too_long());
@@ -126,6 +192,10 @@ pub fn plan(policy: &Policy, op: &Op) -> Result<Plan, OpError> {
 /// 다시 계산한 위험도가 승인받은 위험도보다 높으면(예: 승인 사이에 대상 파일이 생겨 "새 파일"이
 /// "덮어쓰기"가 됨) 실행하지 않는다.
 pub fn execute(policy: &Policy, op: &Op, approved: Risk) -> OpResult {
+    execute_with(policy, &SystemDesktop, op, approved)
+}
+
+pub fn execute_with(policy: &Policy, desktop: &dyn Desktop, op: &Op, approved: Risk) -> OpResult {
     let now = plan(policy, op)?;
     if now.risk.rank() > approved.rank() {
         return Err(OpError::new(
@@ -161,6 +231,31 @@ pub fn execute(policy: &Policy, op: &Op, approved: Risk) -> OpResult {
         } => {
             let out = fsops::write(policy, path, data, *overwrite)?;
             Ok(json!({ "bytes": out.bytes, "overwrote": out.overwrote, "backup": out.backup }))
+        }
+        Op::Screen => {
+            let cap = desktop.capture(policy.screen_max_width)?;
+            let (w, h) = desktop::png_size(&cap.png).unwrap_or((0, 0));
+            Ok(json!({
+                "png_b64": b64(&cap.png),
+                "width": w,
+                "height": h,
+                "screen_width": cap.screen_width,
+                "screen_height": cap.screen_height,
+            }))
+        }
+        Op::Click { x, y, button } => {
+            desktop.click(*x, *y, *button)?;
+            Ok(json!({ "clicked": [x, y], "button": button.as_str() }))
+        }
+        Op::Type { text } => {
+            desktop.type_text(text)?;
+            Ok(json!({ "typed_chars": text.chars().count() }))
+        }
+        Op::Key { combo } => {
+            let parsed = desktop::parse_combo(combo)
+                .map_err(|_| OpError::new(400, "BAD_REQUEST", "unknown key or modifier"))?;
+            desktop.key(&parsed)?;
+            Ok(json!({ "key": parsed.display() }))
         }
     }
 }
@@ -217,6 +312,17 @@ fn describe(op: &Op, resolved: Option<&Path>, risk: Option<Risk>) -> String {
             format!("run {} [{}]", quote(program), list.join(", "))
         }
         Op::Read { path } => format!("read {}", with_resolved(path, resolved)),
+        Op::Screen => {
+            "take a screenshot of the whole screen (the picture is sent to the controller)"
+                .to_string()
+        }
+        Op::Click { x, y, button } => format!("mouse click ({x}, {y}), {} button", button.as_str()),
+        Op::Type { text } => format!(
+            "type {} characters on the keyboard: {}",
+            text.chars().count(),
+            quote(text)
+        ),
+        Op::Key { combo } => format!("press the key combination {}", quote(combo)),
         Op::Write {
             path,
             data,

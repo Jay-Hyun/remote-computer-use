@@ -36,10 +36,17 @@ pub struct Prompt {
 }
 
 pub fn prompt_for(info: &PendingInfo, grant_minutes: u64) -> Prompt {
+    // 입력은 화면에 보이는 무엇이든 누를 수 있다(다른 승인 창 포함). 승인하는 사람이 알아야 한다.
+    let note = if info.capability == "input" {
+        "\n\nNote: input acts on whatever is on this screen, including other approval windows. \
+         Approve only if you know what it is for."
+    } else {
+        ""
+    };
     Prompt {
         title: "rcu: approve request?".to_string(),
         body: format!(
-            "{} ({})\n\n{}",
+            "{} ({})\n\n{}{note}",
             info.capability,
             info.risk.as_str(),
             info.summary

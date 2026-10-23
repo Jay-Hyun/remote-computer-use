@@ -7,6 +7,7 @@
 
 use crate::approval::{Decision, Gate, OpenError, APPROVAL_TIMEOUT};
 use crate::audit::{Audit, Entry};
+use crate::desktop::{Button, Desktop, SystemDesktop};
 use crate::limits::{Limit, Limiter};
 use crate::ops::{self, Op, OpError, OpResult};
 use crate::pairing::{PairError, Pairing};
@@ -45,6 +46,10 @@ pub struct AppState {
     pub audit: Audit,
     pub gate: Arc<Gate>,
     pub limiter: Limiter,
+    /// 입력(클릭·타이핑·키)은 일반 호출보다 훨씬 낮은 분당 상한을 따로 둔다.
+    input_limiter: Limiter,
+    /// 화면·입력 백엔드. 시험에서는 가짜로 바꾼다.
+    pub desktop: Arc<dyn Desktop>,
     /// 인증 실패·잘못된 페어링을 출처별로 센다.
     pre_auth: Limiter,
     /// 인증 실패 감사 줄은 초당 한 줄만 쓰고 나머지는 개수만 센다(로그 폭주 방지).
@@ -58,6 +63,7 @@ impl AppState {
         let gate = Arc::new(Gate::new(Duration::from_secs(policy.grant_minutes * 60)));
         let limiter = Limiter::new(policy.rate_per_minute, policy.daily_cap);
         let http_wait = Duration::from_secs(policy.http_wait_secs);
+        let policy_input_per_minute = policy.input_per_minute;
         AppState {
             policy,
             tokens: Mutex::new(tokens),
@@ -65,6 +71,8 @@ impl AppState {
             audit,
             gate,
             limiter,
+            input_limiter: Limiter::new(policy_input_per_minute, u32::MAX),
+            desktop: Arc::new(SystemDesktop),
             pre_auth: Limiter::new(PRE_AUTH_PER_MINUTE, u32::MAX),
             auth_fail_log: Mutex::new((Instant::now() - Duration::from_secs(10), 0)),
             http_wait,
@@ -101,6 +109,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/exec", post(exec))
         .route("/v1/fs/read", post(fs_read))
         .route("/v1/fs/write", post(fs_write))
+        .route("/v1/screen/capture", post(screen_capture))
+        .route("/v1/input/click", post(input_click))
+        .route("/v1/input/type", post(input_type))
+        .route("/v1/input/key", post(input_key))
         .route("/v1/approvals/:id", get(approval_result))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
@@ -473,6 +485,98 @@ async fn fs_write(
     submit(state, token_id, op, started).await
 }
 
+#[derive(Deserialize)]
+struct ClickRequest {
+    x: i32,
+    y: i32,
+    #[serde(default)]
+    button: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TypeRequest {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct KeyRequest {
+    combo: String,
+}
+
+async fn screen_capture(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    match authenticate(&state, req.headers(), peer.ip(), "screen") {
+        Ok(token_id) => submit(state, token_id, Op::Screen, started).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn input_click(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "input") {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    let body = match read_json::<ClickRequest>(req, BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    let Some(button) = Button::parse(body.button.as_deref().unwrap_or("left")) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "button must be \"left\" or \"right\"",
+        )
+        .into_response();
+    };
+    let op = Op::Click {
+        x: body.x,
+        y: body.y,
+        button,
+    };
+    submit(state, token_id, op, started).await
+}
+
+async fn input_type(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "input") {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match read_json::<TypeRequest>(req, BODY_LIMIT).await {
+        Ok(body) => submit(state, token_id, Op::Type { text: body.text }, started).await,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn input_key(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let token_id = match authenticate(&state, req.headers(), peer.ip(), "input") {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+    match read_json::<KeyRequest>(req, BODY_LIMIT).await {
+        Ok(body) => submit(state, token_id, Op::Key { combo: body.combo }, started).await,
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn approval_result(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -575,9 +679,11 @@ async fn run_audited(
         }
         let risk = plan.risk;
         let st = Arc::clone(&state);
-        let result = tokio::task::spawn_blocking(move || ops::execute(&st.policy, &op, risk))
-            .await
-            .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")));
+        let result = tokio::task::spawn_blocking(move || {
+            ops::execute_with(&st.policy, st.desktop.as_ref(), &op, risk)
+        })
+        .await
+        .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")));
         audit_entry(
             &state,
             &request_id,
@@ -613,6 +719,20 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
             return op_err(&e).into_response();
         }
     };
+
+    if plan.capability == "input"
+        && state
+            .input_limiter
+            .check(&token_id, Instant::now(), today())
+            .is_err()
+    {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "too many input actions; slow down",
+        )
+        .into_response();
+    }
 
     if !plan.risk.always_needs_approval()
         && state
