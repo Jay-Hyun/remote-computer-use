@@ -67,6 +67,17 @@ fn deny(code: Code, message: &'static str) -> PolicyError {
     PolicyError { code, message }
 }
 
+/// 승인을 어디서 받을지. 터미널 프롬프트는 항상 켜져 있고, 이 값은 OS 대화상자 여부만 정한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalUi {
+    /// 대화상자를 쓸 수 있는 환경이면 쓴다(맥·윈도우, 디스플레이와 zenity 가 있는 리눅스).
+    Auto,
+    /// 대화상자 없이 터미널만.
+    Terminal,
+    /// 대화상자 필수. 쓸 수 없으면 `rcu serve` 가 시작하지 않는다.
+    Dialog,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -112,6 +123,7 @@ impl Default for RawLimits {
 struct RawApproval {
     grant_minutes: u64,
     http_wait_secs: u64,
+    ui: String,
 }
 
 impl Default for RawApproval {
@@ -119,6 +131,7 @@ impl Default for RawApproval {
         RawApproval {
             grant_minutes: 60,
             http_wait_secs: 60,
+            ui: "auto".to_string(),
         }
     }
 }
@@ -205,6 +218,7 @@ pub struct Policy {
     pub grant_minutes: u64,
     /// 한 HTTP 요청이 승인을 기다리는 시간. 넘기면 202 + approval_id.
     pub http_wait_secs: u64,
+    pub approval_ui: ApprovalUi,
     roots: Vec<PathBuf>,
     deny: GlobSet,
     exec_allow: Vec<ExecAllow>,
@@ -357,6 +371,12 @@ impl Policy {
             daily_cap: raw.limits.per_day.max(1),
             grant_minutes: raw.approval.grant_minutes.clamp(1, 24 * 60),
             http_wait_secs: raw.approval.http_wait_secs.clamp(1, 120),
+            approval_ui: match raw.approval.ui.as_str() {
+                "auto" => ApprovalUi::Auto,
+                "terminal" => ApprovalUi::Terminal,
+                "dialog" => ApprovalUi::Dialog,
+                _ => anyhow::bail!("approval.ui must be \"auto\", \"terminal\" or \"dialog\""),
+            },
             roots,
             deny: builder.build()?,
             exec_allow,

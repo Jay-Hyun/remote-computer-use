@@ -96,5 +96,6 @@ fi
 say ""
 say "Next:"
 say "  - Edit the policy printed above (everything is off by default), then:  rcu policy-check"
-say "  - On the PC you want to control:  rcu serve      (needs Tailscale; keep the terminal open to approve)"
+say "  - On the PC you want to control:  rcu serve      (needs Tailscale; approve in the terminal or the dialog)"
+say "    or start it at every login:     rcu service install"
 say "  - On this PC:                     rcu pair <name> <ip:port> <code>"

@@ -6,7 +6,7 @@ use rcu::audit::{Audit, RETENTION_DAYS};
 use rcu::client::ClientError;
 use rcu::config::{self, NodeEntry, Nodes};
 use rcu::pairing::Pairing;
-use rcu::policy::Policy;
+use rcu::policy::{ApprovalUi, Policy};
 use rcu::secret_store::{DefaultStore, SecretStore};
 use rcu::server::{self, AppState};
 use rcu::tokens::TokenStore;
@@ -40,6 +40,13 @@ enum Cmd {
     },
     /// (노드) 안전한 기본 정책 파일(모든 능력 꺼짐)을 만든다. 이미 있으면 건드리지 않는다.
     Init,
+    /// (노드) 로그인할 때 `rcu serve` 를 자동으로 띄우는 사용자 서비스를 등록·해제한다.
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+    /// (노드) 실행 중인 노드에서 새 페어링 코드를 받아 출력한다(서비스로 돌 때 터미널이 없으므로).
+    PairCode,
     /// (노드) 발급한 토큰을 모두 폐기한다.
     Revoke {
         #[arg(long)]
@@ -88,6 +95,18 @@ enum Cmd {
     Nodes,
 }
 
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// 서비스를 등록하고 바로 시작한다.
+    Install {
+        /// 파일만 쓰고 시작하지 않는다.
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// 서비스를 멈추고 등록을 지운다.
+    Uninstall,
+}
+
 fn print(value: Value) {
     println!("{value}");
 }
@@ -106,6 +125,8 @@ fn main() {
     let result = match cli.command {
         Cmd::Serve { bind, policy } => serve(bind, policy),
         Cmd::Init => init(),
+        Cmd::Service { action } => service(action),
+        Cmd::PairCode => pair_code(),
         Cmd::Revoke { all } => revoke(all),
         Cmd::PolicyCheck { policy } => policy_check(policy),
         Cmd::Pair {
@@ -152,6 +173,53 @@ fn resolve_bind(bind: Option<String>) -> anyhow::Result<SocketAddr> {
     }
 }
 
+fn service(action: ServiceCmd) -> anyhow::Result<()> {
+    let (outcome, installing) = match action {
+        ServiceCmd::Install { no_start } => (rcu::service::install(!no_start)?, true),
+        ServiceCmd::Uninstall => (rcu::service::uninstall()?, false),
+    };
+    print(json!({
+        if installing { "installed" } else { "uninstalled" }: true,
+        "unit": outcome.unit_path,
+        "started": outcome.started,
+        "notes": outcome.notes,
+        "next": if installing {
+            json!(["rcu pair-code   (prints a pairing code from the running node)"])
+        } else {
+            json!([])
+        },
+    }));
+    if installing && outcome.unit_path.is_some() && !outcome.started && !outcome.notes.is_empty() {
+        anyhow::bail!(
+            "service written but could not be started: {}",
+            outcome.notes.join("; ")
+        );
+    }
+    Ok(())
+}
+
+/// 서비스로 도는 노드에서 새 페어링 코드를 받는다: 요청 파일을 두면 노드가 코드를 만들어 파일에 적는다.
+fn pair_code() -> anyhow::Result<()> {
+    let request = config::pair_request_path()?;
+    let answer = config::pairing_code_path()?;
+    std::fs::create_dir_all(config::state_dir()?)?;
+    let _ = std::fs::remove_file(&answer);
+    std::fs::write(&request, b"")?;
+    for _ in 0..40 {
+        if let Ok(code) = std::fs::read_to_string(&answer) {
+            let code = code.trim().to_string();
+            if !code.is_empty() {
+                let _ = std::fs::remove_file(&answer);
+                print(json!({ "code": code, "expires_in_secs": 300 }));
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let _ = std::fs::remove_file(&request);
+    anyhow::bail!("no answer from the node within 10 s; is `rcu serve` (or the service) running with the same RCU_HOME?")
+}
+
 fn init() -> anyhow::Result<()> {
     let path = config::policy_path()?;
     let created = !path.exists();
@@ -190,13 +258,44 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
     let pairing = Pairing::new(Instant::now());
     let code = pairing.current_code().unwrap_or_default().to_string();
     let grant_minutes = policy.grant_minutes;
+    let use_dialog = match policy.approval_ui {
+        ApprovalUi::Terminal => false,
+        ApprovalUi::Auto => rcu::dialog::available(),
+        ApprovalUi::Dialog => {
+            if !rcu::dialog::available() {
+                anyhow::bail!(
+                    "approval.ui = \"dialog\" but no dialog is available here (Linux needs a display and zenity)"
+                );
+            }
+            true
+        }
+    };
     let state = Arc::new(AppState::new(
         policy,
         TokenStore::new(config::tokens_path()?),
         pairing,
         audit,
     ));
+    let gate_for_dialog = Arc::clone(&state.gate);
     state.gate.set_notifier(Box::new(move |p| {
+        if use_dialog {
+            let runner: rcu::dialog::Runner = Arc::new(move |info, still_waiting| {
+                rcu::dialog::show(info, grant_minutes, still_waiting)
+            });
+            rcu::dialog::spawn_prompt(
+                Arc::clone(&gate_for_dialog),
+                p.clone(),
+                runner,
+                |info, d| {
+                    let verdict = if d == Decision::Deny {
+                        "denied"
+                    } else {
+                        "allowed"
+                    };
+                    println!("[approval {}] {verdict} (dialog)", info.id);
+                },
+            );
+        }
         println!(
             "\n[approval {}] {} ({}): {}",
             p.id,
@@ -252,12 +351,39 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         }
     });
 
+    // `rcu pair-code` 요청 처리: 요청 파일이 보이면 새 코드를 만들어 파일에 적는다.
+    let request_path = config::pair_request_path()?;
+    let answer_path = config::pairing_code_path()?;
+    let _ = std::fs::remove_file(&request_path);
+    let _ = std::fs::remove_file(&answer_path);
+    let for_requests = Arc::clone(&state);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if request_path.exists() {
+            let _ = std::fs::remove_file(&request_path);
+            let code = for_requests.pairing.lock().unwrap().refresh(Instant::now());
+            if write_private(&answer_path, &code).is_ok() {
+                println!("pairing code (5 min): {code}");
+            }
+        }
+    });
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         server::serve(listener, state).await?;
         anyhow::Ok(())
     })
+}
+
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 fn revoke(all: bool) -> anyhow::Result<()> {

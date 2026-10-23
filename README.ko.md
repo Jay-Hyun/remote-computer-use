@@ -30,7 +30,14 @@ irm https://raw.githubusercontent.com/Jay-Hyun/remote-computer-use/main/install.
 ```sh
 rcu init          # 모든 능력이 꺼진 정책 생성. examples/policy.toml 참고해 필요한 것만 켠다
 rcu policy-check
-rcu serve         # 페어링 코드가 나온다. 이 터미널을 열어 두고 요청을 승인한다
+rcu serve         # 페어링 코드가 나온다. 이 터미널이나 뜨는 대화상자에서 요청을 승인한다
+```
+
+로그인할 때 자동으로 띄우려면(sudo 불필요):
+```sh
+rcu service install   # 맥 launchd / 리눅스 systemd --user / 윈도우 예약 작업
+rcu pair-code         # 실행 중인 노드에서 새 페어링 코드를 받는다
+rcu service uninstall
 ```
 
 컨트롤러(에이전트가 도는 PC):
@@ -44,7 +51,7 @@ echo "hello" | rcu write work-mac /Users/me/work/new.txt
 이후에는 에이전트에게 "work-mac에서 git status 확인해줘"라고 하면 됩니다. 승인은 노드에서 합니다.
 
 ## 알아둘 한계
-- 아직 백그라운드 서비스·승인 창이 없어 `rcu serve`를 터미널에서 띄워야 합니다.
+- `rcu service install`을 쓰지 않으면 `rcu serve`를 터미널에 띄워 둬야 합니다. 서비스로 돌 때는 승인이 OS 대화상자로 뜹니다(맥·윈도우, 리눅스는 디스플레이와 `zenity` 필요).
 - 테일스케일 안에서는 평문 HTTP입니다(WireGuard가 암호화). 다른 사람이 있는 tailnet이면 ACL로 포트를 제한하세요.
 - `python`·`node`처럼 다른 프로그램을 실행할 수 있는 프로그램을 허용하면 셸과 같습니다. 인자 패턴을 좁게 쓰세요.
 - 윈도우는 실험적입니다. 릴리스 바이너리는 서명되어 있지 않습니다.

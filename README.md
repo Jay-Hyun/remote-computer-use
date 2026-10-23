@@ -33,7 +33,15 @@ The script downloads the release binary, **verifies its SHA-256**, puts `rcu` on
 ```sh
 rcu init            # writes a policy with everything off; edit it (see examples/policy.toml)
 rcu policy-check
-rcu serve           # prints a pairing code; keep this terminal open — you approve requests here
+rcu serve           # prints a pairing code; approve requests in this terminal or in the dialog that pops up
+```
+
+To have the node start at login (no sudo; approvals then come as dialogs):
+
+```sh
+rcu service install     # launchd (macOS), systemd --user (Linux), scheduled task (Windows)
+rcu pair-code           # prints a fresh pairing code from the running node
+rcu service uninstall
 ```
 
 **On the PC the agent runs on (the controller)**
@@ -71,11 +79,11 @@ Anything not listed is denied. Risk is decided by *your* policy, never by what t
 
 ## Cloud sessions as controller
 
-A cloud container can control your PCs if it joins your tailnet (`tailscaled --tun=userspace-networking`) and gets its token from an environment secret (`RCU_TOKEN_<NODE>`). Get the token yourself with `rcu pair … --print-token`. Proxy support (`RCU_PROXY`) is planned. See [DESIGN.md §17.8](DESIGN.md).
+A cloud container can control your PCs if it joins your tailnet (`tailscaled --tun=userspace-networking`) and gets its token from an environment secret (`RCU_TOKEN_<NODE>`). Get the token yourself with `rcu pair … --print-token`. Point `RCU_PROXY=socks5://localhost:1055` at tailscaled's SOCKS5 server (loopback proxies only) and use the node's tailnet IP. See [DESIGN.md §17.8](DESIGN.md).
 
 ## Limits you should know
 
-- Run `rcu serve` in a terminal for now; there is no background service or GUI approval yet.
+- Without `rcu service install`, `rcu serve` must stay open in a terminal. As a service, approvals use an OS dialog (macOS/Windows; Linux needs a display and `zenity`).
 - Traffic is plain HTTP inside Tailscale's WireGuard tunnel. Restrict the port with Tailscale ACLs if your tailnet has other people.
 - An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell. Keep patterns narrow.
 - Windows: builds and runs, but path hardening against races is not done yet; treat Windows nodes as experimental.

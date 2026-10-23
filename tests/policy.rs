@@ -415,3 +415,18 @@ fn error_messages_do_not_leak_paths() {
     let e = p.check_path(secret_path, Access::Read).unwrap_err();
     assert!(!e.to_string().contains("very-secret-name"));
 }
+
+#[test]
+fn approval_ui_values() {
+    use rcu::policy::ApprovalUi;
+    assert_eq!(Policy::parse("").unwrap().approval_ui, ApprovalUi::Auto);
+    for (text, want) in [
+        ("terminal", ApprovalUi::Terminal),
+        ("dialog", ApprovalUi::Dialog),
+        ("auto", ApprovalUi::Auto),
+    ] {
+        let p = Policy::parse(&format!("[approval]\nui = \"{text}\"\n")).unwrap();
+        assert_eq!(p.approval_ui, want);
+    }
+    assert!(Policy::parse("[approval]\nui = \"popup\"\n").is_err());
+}

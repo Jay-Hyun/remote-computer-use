@@ -24,6 +24,20 @@ pub fn tokens_path() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join("state").join("tokens.json"))
 }
 
+pub fn state_dir() -> anyhow::Result<PathBuf> {
+    Ok(home_dir()?.join("state"))
+}
+
+/// `rcu pair-code` 가 실행 중인 노드에 새 코드를 요청하는 표식 파일.
+pub fn pair_request_path() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("pair-request"))
+}
+
+/// 노드가 새 코드를 적어 주는 파일(읽은 쪽이 지운다).
+pub fn pairing_code_path() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("pairing-code"))
+}
+
 pub fn audit_dir() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join("audit"))
 }

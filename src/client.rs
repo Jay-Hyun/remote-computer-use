@@ -27,7 +27,7 @@ impl ClientError {
         match self.code.as_str() {
             "UNAUTHORIZED" | "PAIR_WRONG" | "PAIR_LOCKED" | "PAIR_EXPIRED" => 4,
             "CAPABILITY_OFF" | "PATH_DENIED" | "COMMAND_DENIED" | "SHELL_DENIED"
-            | "APPROVAL_DENIED" | "APPROVAL_TIMEOUT" | "ADDRESS_DENIED" => 2,
+            | "APPROVAL_DENIED" | "APPROVAL_TIMEOUT" | "ADDRESS_DENIED" | "PROXY_DENIED" => 2,
             "APPROVAL_PENDING" => 3,
             "NETWORK_ERROR" => 5,
             _ => 1,
@@ -66,7 +66,12 @@ impl From<ErrBody> for ClientError {
 fn resolve(addr: &str) -> Result<SocketAddr, ClientError> {
     let addrs: Vec<SocketAddr> = addr
         .to_socket_addrs()
-        .map_err(|_| ClientError::new("NETWORK_ERROR", "cannot resolve node address"))?
+        .map_err(|_| {
+            ClientError::new(
+                "NETWORK_ERROR",
+                "cannot resolve node address (behind a proxy, use the node's tailnet IP instead of a name)",
+            )
+        })?
         .collect();
     let first = *addrs
         .first()
@@ -82,11 +87,40 @@ fn resolve(addr: &str) -> Result<SocketAddr, ClientError> {
     Ok(first)
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
+/// `RCU_PROXY` 는 이 PC 위의 SOCKS5 프록시만 허용한다(예: 클라우드 컨테이너의
+/// `tailscaled --tun=userspace-networking --socks5-server=localhost:1055`).
+/// 원격 프록시는 평문 HTTP 와 토큰을 그대로 보게 되므로 쓰지 않는다.
+pub fn proxy_url_ok(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("socks5://")
+        .or_else(|| url.strip_prefix("socks5h://"))
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn agent() -> Result<ureq::Agent, ClientError> {
+    let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
-        .timeout(Duration::from_secs(70))
-        .build()
+        .timeout(Duration::from_secs(70));
+    if let Some(url) = std::env::var("RCU_PROXY").ok().filter(|v| !v.is_empty()) {
+        if !proxy_url_ok(&url) {
+            return Err(ClientError::new(
+                "PROXY_DENIED",
+                "RCU_PROXY must be a socks5:// proxy on this machine (localhost / 127.0.0.1 / [::1])",
+            ));
+        }
+        let proxy = ureq::Proxy::new(&url)
+            .map_err(|_| ClientError::new("PROXY_DENIED", "RCU_PROXY is not a valid proxy URL"))?;
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder.build())
 }
 
 fn finish(result: Result<ureq::Response, ureq::Error>) -> Result<Value, ClientError> {
@@ -112,7 +146,7 @@ fn finish(result: Result<ureq::Response, ureq::Error>) -> Result<Value, ClientEr
 pub fn pair(addr: &str, code: &str, controller: &str) -> Result<Value, ClientError> {
     let sock = resolve(addr)?;
     finish(
-        agent()
+        agent()?
             .post(&format!("http://{sock}/v1/pair"))
             .send_json(json!({ "code": code, "controller": controller })),
     )
@@ -121,7 +155,7 @@ pub fn pair(addr: &str, code: &str, controller: &str) -> Result<Value, ClientErr
 pub fn info(addr: &str, token: &str) -> Result<Value, ClientError> {
     let sock = resolve(addr)?;
     finish(
-        agent()
+        agent()?
             .get(&format!("http://{sock}/v1/info"))
             .set("Authorization", &format!("Bearer {token}"))
             .call(),
@@ -131,7 +165,7 @@ pub fn info(addr: &str, token: &str) -> Result<Value, ClientError> {
 fn post(addr: &str, token: &str, path: &str, body: Value) -> Result<Value, ClientError> {
     let sock = resolve(addr)?;
     finish(
-        agent()
+        agent()?
             .post(&format!("http://{sock}{path}"))
             .set("Authorization", &format!("Bearer {token}"))
             .send_json(body),
@@ -170,7 +204,7 @@ pub fn fs_write(
 pub fn wait(addr: &str, token: &str, approval_id: &str) -> Result<Value, ClientError> {
     let sock = resolve(addr)?;
     finish(
-        agent()
+        agent()?
             .get(&format!("http://{sock}/v1/approvals/{approval_id}"))
             .set("Authorization", &format!("Bearer {token}"))
             .call(),

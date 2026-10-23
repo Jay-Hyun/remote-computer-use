@@ -30,6 +30,7 @@ risk = "read"
 # max_output_bytes = 65536   # stdout/stderr 각각의 상한
 #
 # [approval]
+# ui = "auto"               # auto | terminal | dialog. 대화상자(맥·윈도우·zenity)를 쓸지. 서비스로 돌 때는 dialog 가 필요
 # grant_minutes = 60         # "a" 로 승인했을 때 유지 시간
 # http_wait_secs = 60        # 컨트롤러 요청 하나가 승인을 기다리는 시간. 넘기면 exit 3 + approval_id
 #

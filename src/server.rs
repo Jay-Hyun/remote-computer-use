@@ -29,7 +29,7 @@ pub struct AppState {
     pub tokens: Mutex<TokenStore>,
     pub pairing: Mutex<Pairing>,
     pub audit: Audit,
-    pub gate: Gate,
+    pub gate: Arc<Gate>,
     pub limiter: Limiter,
     /// 한 HTTP 요청이 승인을 기다리는 최대 시간. 넘기면 202 + approval_id.
     pub http_wait: Duration,
@@ -37,7 +37,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(policy: Policy, tokens: TokenStore, pairing: Pairing, audit: Audit) -> AppState {
-        let gate = Gate::new(Duration::from_secs(policy.grant_minutes * 60));
+        let gate = Arc::new(Gate::new(Duration::from_secs(policy.grant_minutes * 60)));
         let limiter = Limiter::new(policy.rate_per_minute, policy.daily_cap);
         let http_wait = Duration::from_secs(policy.http_wait_secs);
         AppState {

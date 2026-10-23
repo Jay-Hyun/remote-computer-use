@@ -354,4 +354,9 @@ risk    = "read"                   # read | write | destructive | external
 - `rcu init`: 모든 능력이 꺼진 `policy.toml`을 만든다(이미 있으면 그대로). `rcu serve`는 `--bind`가 없으면 `tailscale ip -4`로 테일넷 주소를 찾아 7443에서 듣는다. 못 찾으면 이유와 `--bind 127.0.0.1:7443`을 안내하고 멈춘다.
 - `install.sh` / `install.ps1`: 릴리스 바이너리 + `SHA256SUMS`를 받아 검증한 뒤 설치하고 `rcu init`을 돌린다. `claude`/`codex`가 있으면 플러그인·스킬도 설치한다.
 - 릴리스: `v*` 태그를 푸시하면 `.github/workflows/release.yml`이 리눅스(musl 정적)·맥(arm64/x64)·윈도우 바이너리를 빌드해 GitHub Release에 올린다. 태그와 `Cargo.toml` 버전이 다르면 실패한다.
-- 서비스 등록(launchd/윈도우 서비스)은 **아직 없다.** 승인이 노드 터미널 입력이라 터미널 없는 백그라운드 프로세스는 모든 승인 요청이 시간 초과로 거부된다. OS 대화상자 승인(맥 `osascript`, 윈도우 MessageBox)을 붙인 뒤에 추가한다.
+
+### 17.13 대화상자 승인·서비스·프록시 (v0.3 예정분, 구현됨)
+- **승인 대화상자**: 맥 `osascript`, 윈도우 PowerShell `MessageBox`, 리눅스 `zenity`. 요청 설명은 스크립트에 끼워 넣지 않고 인자(맥·리눅스)나 환경 변수(윈도우)로 넘긴다. 버튼: 거부 / 한 번 / N분(destructive·external은 N분 없음). 기본 선택은 거부, 5분 안에 답이 없으면 거부. 터미널 프롬프트와 동시에 떠 있고 먼저 온 답이 이긴다(다른 쪽 대화상자는 닫힌다). `[approval] ui = "auto" | "terminal" | "dialog"`, 기본 auto.
+- **서비스**: `rcu service install`이 사용자 단위로 등록한다(맥 `~/Library/LaunchAgents/io.github.jay-hyun.rcu.plist`, 리눅스 `~/.config/systemd/user/rcu-node.service`, 윈도우 예약 작업 `rcu-node`, 로그온 시 실행). 윈도우는 서비스가 아니라 사용자 세션 작업이라 대화상자가 보인다. 시작이 Tailscale보다 빠르면 `serve`가 주소를 못 찾아 종료하고 재시작 정책이 다시 띄운다.
+- **`rcu pair-code`**: 서비스에는 터미널이 없으므로, 요청 파일(`state/pair-request`)을 두면 노드가 새 코드를 `state/pairing-code`(0600)에 적고 명령이 읽어 출력한 뒤 파일을 지운다. 같은 사용자 권한의 파일만 쓴다.
+- **`RCU_PROXY`**: `socks5://` 또는 `socks5h://` 이고 호스트가 `localhost`·`127.0.0.1`·`::1`일 때만 쓴다(원격 프록시는 평문 HTTP와 토큰을 보게 된다). 주소 검사는 프록시와 무관하게 로컬에서 푼 IP로 하므로, 프록시를 쓸 때는 이름 대신 노드의 테일넷 IP를 쓴다.

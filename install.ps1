@@ -75,5 +75,6 @@ if ($env:RCU_SKIP_SKILLS -ne '1') {
 Write-Host ''
 Write-Host 'Next:'
 Write-Host '  - Edit the policy printed above (everything is off by default), then:  rcu policy-check'
-Write-Host '  - On the PC you want to control:  rcu serve      (needs Tailscale; keep the terminal open to approve)'
+Write-Host '  - On the PC you want to control:  rcu serve      (needs Tailscale; approve in the terminal or the dialog)'
+Write-Host '    or start it at every login:     rcu service install'
 Write-Host '  - On this PC:                     rcu pair <name> <ip:port> <code>'

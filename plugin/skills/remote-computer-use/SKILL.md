@@ -26,7 +26,7 @@ description: Use when the user wants to inspect or operate another of their PCs 
 
 Run `rcu info <node>` first and only use what its `capabilities` lists. Programs must be given as absolute paths and match the node's allow list; if you do not know what is allowed, ask the user rather than probing.
 
-The node user approves in the node's terminal (`y` once, `a` for a period, `n` deny). Expect to wait: the first request of each kind needs approval, later ones within the grant period do not. Overwrites and destructive commands are asked every time.
+The node user approves in the node's terminal or in an OS dialog (once / for a period / deny). Expect to wait: the first request of each kind needs approval, later ones within the grant period do not. Overwrites and destructive commands are asked every time.
 
 ## Output contract
 
@@ -51,4 +51,4 @@ stdout is one JSON object. Failures are `{"error":{"code","message"}}`. Exit cod
 
 ## Cloud sessions
 
-A cloud container reaches the tailnet only if it runs `tailscaled --tun=userspace-networking --socks5-server=localhost:1055` and `RCU_PROXY=socks5://localhost:1055` is set (proxy support lands in M3). If `rcu info` returns exit 5 there, say that the container is probably not on the tailnet.
+A cloud container reaches the tailnet only if it runs `tailscaled --tun=userspace-networking --socks5-server=localhost:1055` and `RCU_PROXY=socks5://localhost:1055` is set (loopback proxies only; use the node's tailnet IP, not a name). If `rcu info` returns exit 5 there, say that the container is probably not on the tailnet. `PROXY_DENIED` (exit 2) means `RCU_PROXY` points somewhere other than this machine; do not change it.

@@ -2,6 +2,14 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer (0.x: breaking changes possible).
 
+## [Unreleased]
+
+### Added
+- `rcu service install|uninstall`: start the node at login (launchd / systemd --user / Windows scheduled task), no sudo.
+- OS approval dialogs (macOS `osascript`, Windows MessageBox, Linux `zenity`); `approval.ui = auto | terminal | dialog`. Terminal and dialog work together, first answer wins.
+- `rcu pair-code`: fresh pairing code from a running (service) node.
+- `RCU_PROXY=socks5://localhost:PORT` for controllers behind tailscaled's userspace SOCKS5 (loopback proxies only).
+
 ## [0.2.0]
 
 ### Added
