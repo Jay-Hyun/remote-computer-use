@@ -49,9 +49,20 @@ enum Cmd {
     PairCode,
     /// (노드) 발급한 토큰을 모두 폐기한다.
     Revoke {
+        /// 토큰 id(`rcu tokens` 에서 확인). 하나만 폐기한다.
+        id: Option<String>,
+        /// 발급한 토큰을 모두 폐기한다.
         #[arg(long)]
         all: bool,
     },
+    /// (노드) 발급된 토큰 목록(id, 라벨, 생성·만료 시각). 토큰 값은 노드에도 없다.
+    Tokens,
+    /// (컨트롤러) 노드 등록과 보관된 토큰을 지운다.
+    Unpair { node: String },
+    /// 이 PC 설정을 한 번에 점검하고 고칠 방법을 알려 준다(노드·컨트롤러 모두).
+    Doctor,
+    /// 셸 자동완성 스크립트를 출력한다.
+    Completions { shell: clap_complete::Shell },
     /// (노드) 정책 파일을 검사한다.
     PolicyCheck {
         #[arg(long)]
@@ -152,7 +163,11 @@ fn main() {
         Cmd::Init => init(),
         Cmd::Service { action } => service(action),
         Cmd::PairCode => pair_code(),
-        Cmd::Revoke { all } => revoke(all),
+        Cmd::Revoke { all, id } => revoke(all, id.as_deref()),
+        Cmd::Tokens => tokens(),
+        Cmd::Unpair { node } => unpair(&node),
+        Cmd::Doctor => doctor(),
+        Cmd::Completions { shell } => completions(shell),
         Cmd::PolicyCheck { policy } => policy_check(policy),
         Cmd::Pair {
             name,
@@ -464,11 +479,13 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
     })
 }
 
-fn revoke(all: bool) -> anyhow::Result<()> {
-    if !all {
-        anyhow::bail!("use --all to revoke every token on this node");
-    }
-    let n = TokenStore::new(config::tokens_path()?).revoke_all()?;
+fn revoke(all: bool, id: Option<&str>) -> anyhow::Result<()> {
+    let store = TokenStore::new(config::tokens_path()?);
+    let n = match (all, id) {
+        (true, None) => store.revoke_all()?,
+        (false, Some(id)) => store.revoke(id)?,
+        _ => anyhow::bail!("use either --all or one token id (see `rcu tokens`)"),
+    };
     print(json!({ "revoked": n }));
     Ok(())
 }
@@ -509,6 +526,7 @@ fn pair(name: &str, addr: &str, code: &str, print_token: bool) -> anyhow::Result
     nodes.upsert(NodeEntry {
         name: name.to_string(),
         addr: addr.to_string(),
+        node_name: resp["node"].as_str().map(str::to_string),
     });
     nodes.save()?;
     print(out);
@@ -535,7 +553,61 @@ fn node_and_token(name: &str) -> anyhow::Result<(String, String)> {
 
 fn info(name: &str) -> anyhow::Result<()> {
     let (addr, token) = node_and_token(name)?;
-    print(rcu::client::info(&addr, &token)?);
+    let mut value = rcu::client::info(&addr, &token)?;
+    // 페어링 때 본 노드 이름과 다르면 알린다(주소가 다른 PC 로 바뀌었을 수 있다).
+    let nodes = Nodes::load()?;
+    if let (Some(pinned), Some(now)) = (
+        nodes.get(name).and_then(|n| n.node_name.clone()),
+        value["name"].as_str(),
+    ) {
+        if pinned != now {
+            value["warning"] = json!(format!(
+                "this node introduced itself as \"{pinned}\" when you paired, but now answers as \"{now}\"; make sure the address still points at the PC you meant"
+            ));
+        }
+    }
+    print(value);
+    Ok(())
+}
+
+fn unpair(name: &str) -> anyhow::Result<()> {
+    let mut nodes = Nodes::load()?;
+    let before = nodes.nodes.len();
+    nodes.nodes.retain(|n| n.name != name);
+    let removed = before - nodes.nodes.len();
+    nodes.save()?;
+    let secret_error = DefaultStore.delete(name).err().map(|e| format!("{e:#}"));
+    print(json!({
+        "unpaired": name,
+        "was_registered": removed > 0,
+        "secret_error": secret_error,
+        "note": "tokens held in the environment (RCU_TOKEN_*) are not touched; to cut access completely, also run `rcu revoke <id>` on the node",
+    }));
+    Ok(())
+}
+
+fn tokens() -> anyhow::Result<()> {
+    let list = TokenStore::new(config::tokens_path()?).list()?;
+    print(json!({ "tokens": list }));
+    Ok(())
+}
+
+fn doctor() -> anyhow::Result<()> {
+    let checks = rcu::doctor::run();
+    for c in &checks {
+        eprintln!("{}", rcu::doctor::line(c));
+    }
+    let ok = rcu::doctor::overall_ok(&checks);
+    print(json!({ "ok": ok, "checks": checks }));
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn completions(shell: clap_complete::Shell) -> anyhow::Result<()> {
+    use clap::CommandFactory;
+    clap_complete::generate(shell, &mut Cli::command(), "rcu", &mut std::io::stdout());
     Ok(())
 }
 

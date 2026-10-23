@@ -2,6 +2,14 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer (0.x: breaking changes possible).
 
+## [Unreleased]
+
+### Added
+- `rcu doctor`: one-shot health check of the node and controller sides with a suggested fix for each problem.
+- `rcu tokens` and `rcu revoke <id>` (one controller instead of all), `[auth] token_days` for expiring tokens, `rcu unpair <node>`, `rcu completions <shell>`.
+- `rcu info` warns when a node answers under a different name than it had when paired.
+- CI runs on every branch push, with a real node/controller smoke test (`scripts/smoke.sh`, `scripts/smoke.ps1`) on Linux, macOS and Windows runners.
+
 ## [0.3.0]
 
 ### Added

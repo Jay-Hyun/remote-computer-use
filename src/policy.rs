@@ -112,6 +112,14 @@ struct RawPolicy {
     approval: RawApproval,
     screen: RawScreen,
     input: RawInput,
+    auth: RawAuth,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct RawAuth {
+    /// 0 이면 토큰이 만료되지 않는다.
+    token_days: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,6 +269,7 @@ pub struct Policy {
     pub rate_per_minute: u32,
     pub daily_cap: u32,
     pub input_per_minute: u32,
+    pub token_days: u32,
     pub screen_enabled: bool,
     pub input_enabled: bool,
     /// 캡처가 이미지 폭을 이 값으로 줄여 돌려준다.
@@ -516,6 +525,7 @@ impl Policy {
             rate_per_minute: raw.limits.per_minute.max(1),
             daily_cap: raw.limits.per_day.max(1),
             input_per_minute: raw.limits.input_per_minute.max(1),
+            token_days: raw.auth.token_days.min(3650),
             screen_enabled: raw.capabilities.screen,
             input_enabled: raw.capabilities.input,
             screen_max_width: raw.screen.max_width.clamp(320, 7680),

@@ -33,7 +33,7 @@ function Quote-Arg([string]$a) {
 }
 
 # Run rcu with a given RCU_HOME and optional token; returns @{Code; Out}.
-function Run-Rcu([string]$home, [string[]]$CliArgs, [string]$StdinText = '') {
+function Run-Rcu([string]$RcuHome, [string[]]$CliArgs, [string]$StdinText = '') {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Rcu
     $psi.Arguments = ($CliArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
@@ -41,7 +41,7 @@ function Run-Rcu([string]$home, [string[]]$CliArgs, [string]$StdinText = '') {
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.EnvironmentVariables['RCU_HOME'] = $home
+    $psi.EnvironmentVariables['RCU_HOME'] = $RcuHome
     $psi.EnvironmentVariables['RCU_TOKEN_SMOKE'] = $script:Token
     $p = [System.Diagnostics.Process]::Start($psi)
     $p.StandardInput.Write($StdinText)
@@ -60,7 +60,7 @@ function Prompt-Count() {
 function Approved([string]$answer, [string[]]$CliArgs, [string]$StdinText = '') {
     $before = Prompt-Count
     $job = Start-Job -ScriptBlock {
-        param($rcu, $home, $token, $argLine, $stdin)
+        param($rcu, $rcuHome, $token, $argLine, $stdin)
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $rcu
         $psi.Arguments = $argLine
@@ -68,7 +68,7 @@ function Approved([string]$answer, [string[]]$CliArgs, [string]$StdinText = '') 
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
-        $psi.EnvironmentVariables['RCU_HOME'] = $home
+        $psi.EnvironmentVariables['RCU_HOME'] = $rcuHome
         $psi.EnvironmentVariables['RCU_TOKEN_SMOKE'] = $token
         $p = [System.Diagnostics.Process]::Start($psi)
         $p.StandardInput.Write($stdin)

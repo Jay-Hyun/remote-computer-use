@@ -31,6 +31,9 @@ risk = "read"
 # timeout_secs = 30          # 명령 실행 제한(최대 600)
 # max_output_bytes = 65536   # stdout/stderr 각각의 상한
 #
+# [auth]
+# token_days = 90            # 페어링으로 발급하는 토큰의 유효 기간(일). 0 = 무기한(기본)
+#
 # [approval]
 # ui = "auto"               # auto | terminal | dialog. 대화상자(맥·윈도우·zenity)를 쓸지. 서비스로 돌 때는 dialog 가 필요
 # grant_minutes = 60         # "a" 로 승인했을 때 유지 시간

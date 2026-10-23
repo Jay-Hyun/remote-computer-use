@@ -14,6 +14,27 @@ struct Entry {
     label: String,
     hash: String,
     created: String,
+    /// RFC 3339. 없으면 만료되지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires: Option<String>,
+}
+
+/// `rcu tokens` 에 보이는 정보(해시는 보이지 않는다).
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenInfo {
+    pub id: String,
+    pub label: String,
+    pub created: String,
+    pub expires: Option<String>,
+}
+
+fn expired(entry: &Entry) -> bool {
+    use time::format_description::well_known::Rfc3339;
+    entry
+        .expires
+        .as_deref()
+        .and_then(|e| time::OffsetDateTime::parse(e, &Rfc3339).ok())
+        .is_some_and(|t| t <= time::OffsetDateTime::now_utc())
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -78,6 +99,16 @@ impl TokenStore {
 
     /// 새 토큰을 발급한다. 원문은 이 반환값으로만 볼 수 있다.
     pub fn issue(&self, label: &str, created: &str) -> anyhow::Result<String> {
+        self.issue_with_expiry(label, created, None)
+    }
+
+    /// `expires` 는 RFC 3339 시각. 그 뒤에는 토큰이 거부된다.
+    pub fn issue_with_expiry(
+        &self,
+        label: &str,
+        created: &str,
+        expires: Option<String>,
+    ) -> anyhow::Result<String> {
         let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes::<32>());
         let token = format!("rcu_{secret}");
         self.locked(|| {
@@ -92,6 +123,7 @@ impl TokenStore {
                 label: label.chars().take(64).collect(),
                 hash: hash_token(&token),
                 created: created.to_string(),
+                expires,
             });
             self.write(&file)?;
             Ok(token)
@@ -101,8 +133,45 @@ impl TokenStore {
     /// 이 id 의 토큰이 아직 발급된 상태인지(폐기되면 false).
     pub fn exists(&self, id: &str) -> bool {
         self.read()
-            .map(|f| f.tokens.iter().any(|t| t.id == id))
+            .map(|f| f.tokens.iter().any(|t| t.id == id && !expired(t)))
             .unwrap_or(false)
+    }
+
+    pub fn list(&self) -> anyhow::Result<Vec<TokenInfo>> {
+        Ok(self
+            .read()?
+            .tokens
+            .into_iter()
+            .map(|t| TokenInfo {
+                id: t.id,
+                label: t.label,
+                created: t.created,
+                expires: t.expires,
+            })
+            .collect())
+    }
+
+    /// id 하나(또는 2자 이상의 유일한 앞부분)에 해당하는 토큰만 폐기한다. 폐기한 개수.
+    pub fn revoke(&self, id: &str) -> anyhow::Result<usize> {
+        self.locked(|| {
+            let mut file = self.read()?;
+            let matches: Vec<usize> = file
+                .tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.id == id || (id.len() >= 4 && t.id.starts_with(id)))
+                .map(|(i, _)| i)
+                .collect();
+            if matches.len() > 1 {
+                anyhow::bail!("that id prefix matches several tokens; type more of it");
+            }
+            let Some(&index) = matches.first() else {
+                return Ok(0);
+            };
+            file.tokens.remove(index);
+            self.write(&file)?;
+            Ok(1)
+        })
     }
 
     /// 맞는 토큰이면 토큰 id 를 돌려준다. 모든 항목을 상수 시간으로 비교한다.
@@ -111,7 +180,7 @@ impl TokenStore {
         let given = hash_token(token);
         let mut found = None;
         for entry in &file.tokens {
-            if bool::from(entry.hash.as_bytes().ct_eq(given.as_bytes())) {
+            if bool::from(entry.hash.as_bytes().ct_eq(given.as_bytes())) && !expired(entry) {
                 found = Some(entry.id.clone());
             }
         }

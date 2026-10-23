@@ -135,8 +135,11 @@ set -e
 step "service files (no start)"
 HOME_BACKUP="${HOME:-}"
 export HOME="$tmp/home"; mkdir -p "$HOME"
+XDG_BACKUP="${XDG_CONFIG_HOME:-}"
+export XDG_CONFIG_HOME="$HOME/.config"
 RCU_HOME="$NODE_HOME" "$RCU" service install --no-start | json 'd["unit"]' | grep -q "$HOME" || fail "service unit must be under the user's home"
 RCU_HOME="$NODE_HOME" "$RCU" service uninstall > /dev/null
 export HOME="$HOME_BACKUP"
+if [ -n "$XDG_BACKUP" ]; then export XDG_CONFIG_HOME="$XDG_BACKUP"; else unset XDG_CONFIG_HOME; fi
 
 printf '\nSMOKE OK (%s)\n' "$("$RCU" --version)"

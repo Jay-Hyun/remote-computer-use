@@ -58,6 +58,8 @@ echo "hello" | rcu write work-mac /Users/me/work/new.txt
 
 Then just ask your agent: *"check git status on work-mac"*. The skill makes it use `rcu`, and you approve on the node.
 
+Housekeeping: `rcu doctor` checks this PC and says how to fix what is wrong; `rcu tokens` / `rcu revoke <id>` list and cut off one controller on a node; `rcu unpair <name>` forgets a node; `rcu completions <shell>` prints shell completions.
+
 Output is always one JSON object. Exit codes: `0` ok · `2` denied by the node's policy · `3` waiting for your approval (`rcu wait`) · `4` auth · `5` can't reach the node. Details: [proto/errors.md](proto/errors.md).
 
 ## Policy in 20 seconds

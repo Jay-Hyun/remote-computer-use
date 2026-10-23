@@ -50,6 +50,9 @@ pub fn nodes_path() -> anyhow::Result<PathBuf> {
 pub struct NodeEntry {
     pub name: String,
     pub addr: String,
+    /// 페어링 때 노드가 알려 준 이름. 나중에 달라지면 경고한다(주소 바꿔치기 탐지).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
 }
 
 /// 컨트롤러가 아는 노드. 토큰은 여기 두지 않는다(보안 저장소).

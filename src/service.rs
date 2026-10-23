@@ -156,6 +156,22 @@ fn write_unit(path: &Path, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 로그인 서비스가 등록되어 있는지.
+pub fn is_installed() -> bool {
+    #[cfg(unix)]
+    {
+        unit_path().map(|p| p.exists()).unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        Command::new("schtasks")
+            .args(["/Query", "/TN", TASK_NAME])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 pub fn install(start: bool) -> anyhow::Result<Outcome> {
     let exe = std::env::current_exe().context("cannot find the rcu executable")?;
     check_path_text("the rcu executable path", &exe)?;

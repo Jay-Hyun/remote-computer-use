@@ -369,11 +369,17 @@ async fn pair(
     } else {
         &req.controller
     };
+    let expires = (state.policy.token_days > 0).then(|| {
+        use time::format_description::well_known::Rfc3339;
+        (OffsetDateTime::now_utc() + time::Duration::days(state.policy.token_days as i64))
+            .format(&Rfc3339)
+            .unwrap_or_default()
+    });
     let token = state
         .tokens
         .lock()
         .unwrap()
-        .issue(label, &Audit::now())
+        .issue_with_expiry(label, &Audit::now(), expires)
         .map_err(|_| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
