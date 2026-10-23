@@ -41,6 +41,10 @@ async fn start(extra: &str, http_wait_ms: u64) -> T {
         exec_entries +=
             &format!("[[exec.allow]]\nprogram = '{sleep}'\nargs = [\"*\"]\nrisk = \"write\"\n");
     }
+    if let Some(yes) = tool(&["/usr/bin/yes", "/bin/yes"]) {
+        exec_entries +=
+            &format!("[[exec.allow]]\nprogram = '{yes}'\nargs = [\"*\"]\nrisk = \"write\"\n");
+    }
     if let Some(rm) = tool(&["/bin/rm", "/usr/bin/rm"]) {
         exec_entries +=
             &format!("[[exec.allow]]\nprogram = '{rm}'\nargs = [\"*\"]\nrisk = \"destructive\"\n");
@@ -358,10 +362,41 @@ async fn exec_runs_without_a_shell_and_caps_output() {
     // 셸이 없으므로 확장되거나 실행되지 않고 그대로 출력된다.
     assert_eq!(v["stdout"], "hi $HOME ; id\n");
 
-    let big = "x".repeat(10_000);
-    let v = exec(&t, &echo, &[&big]).await.unwrap();
+    // 끝없이 출력하는 명령: 출력은 상한에서 잘리고 시간 제한에서 끝난다.
+    let yes = tool(&["/usr/bin/yes", "/bin/yes"]).unwrap();
+    let v = exec(&t, &yes, &["x"]).await.unwrap();
     assert_eq!(v["truncated"], true);
+    assert_eq!(v["timed_out"], true);
     assert!(v["stdout"].as_str().unwrap().len() <= 2048);
+    assert!(
+        v["stdout"].as_str().unwrap().len() >= 1024,
+        "partial output must be kept"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn requests_too_long_to_show_for_approval_are_refused_before_asking() {
+    let t = start("", 200).await;
+    let echo = tool(&["/bin/echo", "/usr/bin/echo"]).unwrap();
+    let padding = "a".repeat(700);
+    let e = exec(&t, &echo, &["status", &padding, "--dangerous-tail"])
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "TOO_LARGE");
+    assert!(
+        t.state.gate.waiting().is_empty(),
+        "nothing may reach the approval queue"
+    );
+    // 긴 경로도 마찬가지
+    let mut dir = std::path::PathBuf::from(t.path("deep"));
+    for _ in 0..4 {
+        dir.push("p".repeat(200));
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("f.txt"), "x").unwrap();
+    let long_path = dir.join("f.txt").to_string_lossy().into_owned();
+    assert_eq!(read(&t, long_path).await.unwrap_err().code, "TOO_LARGE");
 }
 
 #[cfg(unix)]

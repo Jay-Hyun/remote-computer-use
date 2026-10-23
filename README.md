@@ -85,7 +85,7 @@ A cloud container can control your PCs if it joins your tailnet (`tailscaled --t
 
 - Without `rcu service install`, `rcu serve` must stay open in a terminal. As a service, approvals use an OS dialog (macOS/Windows; Linux needs a display and `zenity`).
 - Traffic is plain HTTP inside Tailscale's WireGuard tunnel. Restrict the port with Tailscale ACLs if your tailnet has other people.
-- An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell. Keep patterns narrow.
+- An allow-listed program that can run other programs (`python`, `node`, `find -exec`…) is as powerful as a shell, and exec arguments are not checked against `fs.roots`. Keep patterns narrow; `rcu policy-check` warns about risky entries.
 - Windows: builds and runs, but path hardening against races is not done yet; treat Windows nodes as experimental.
 - Release binaries are not code-signed.
 

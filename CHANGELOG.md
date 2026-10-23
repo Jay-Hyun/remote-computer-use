@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versions follow SemVer 
 
 ## [Unreleased]
 
+### Security (from an independent code review)
+- An approval is bound to the risk that was shown: if the target changed while waiting (e.g. a file appeared so "create" became "overwrite"), the request is refused with `STATE_CHANGED`.
+- Approval text is never truncated: arguments are quoted individually, invisible/bidi characters are shown as `\u{..}`, symlinks show their real target, and requests too long to show are refused (`TOO_LARGE`). zenity backslash unescaping can no longer fake lines.
+- Overwrites: the file is opened and verified before anything is changed; the backup is made from the verified file with `create_new`/`O_NOFOLLOW`, never replaces an older backup (`.rcu-bak`, `.rcu-bak.1`, …) and never follows links; hardlinked files are refused; FIFOs/special files no longer hang a worker.
+- Built-in deny list (shell startup files, `.ssh`, `.aws`, autostart/LaunchAgents, …) that no policy can lift; deny globs are case-insensitive and also match through symlinked prefixes; relative or unexpandable deny patterns are rejected; the node's own config/state directory is unreachable through file access.
+- More shells/wrappers cannot be allow-listed (busybox, timeout, nsenter, …); `rcu policy-check` and `rcu serve` warn about interpreter-like allow entries, programs inside `fs.roots`, and the fact that exec arguments bypass `fs` rules.
+- Commands run in their own process group and the whole group is killed on timeout; at most 8 run at once (`BUSY`); partial output is kept.
+- File size limits are clamped to 64 MiB.
+- Installers: https enforced (`RCU_ALLOW_INSECURE=1` for local testing), `SKILL.md` ships as a checksummed release asset, extraction limited to the binary, script wrapped in `main()`; Windows installer extracts only `rcu.exe` and keeps `%VAR%` PATH entries.
+- Release workflow: only a pushed tag publishes (not a manual run), `release` environment, build provenance attestation, versions of tag / Cargo.toml / plugin.json must agree.
+- systemd unit escapes `%`/`$`, refuses newlines in paths, sets `NoNewPrivileges=yes`.
+
 ### Added
 - `rcu service install|uninstall`: start the node at login (launchd / systemd --user / Windows scheduled task), no sudo.
 - OS approval dialogs (macOS `osascript`, Windows MessageBox, Linux `zenity`); `approval.ui = auto | terminal | dialog`. Terminal and dialog work together, first answer wins.

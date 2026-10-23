@@ -414,8 +414,8 @@ async fn wait_result(
     }
 }
 
-async fn run_blocking(state: Arc<AppState>, op: Op) -> OpResult {
-    tokio::task::spawn_blocking(move || ops::execute(&state.policy, &op))
+async fn run_blocking(state: Arc<AppState>, op: Op, approved: Risk) -> OpResult {
+    tokio::task::spawn_blocking(move || ops::execute(&state.policy, &op, approved))
         .await
         .unwrap_or_else(|_| Err(OpError::new(500, "INTERNAL", "operation crashed")))
 }
@@ -451,7 +451,7 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
             .gate
             .grant_alive(&token_id, plan.capability, Instant::now())
     {
-        let result = run_blocking(state.clone(), op).await;
+        let result = run_blocking(state.clone(), op, plan.risk).await;
         audit_entry(
             &state,
             &random_id(),
@@ -468,7 +468,7 @@ async fn submit(state: Arc<AppState>, token_id: String, op: Op, started: Instant
     let wait = state.http_wait;
     let opened = state
         .gate
-        .open(&token_id, plan.capability, plan.risk, ops::summary(&op));
+        .open(&token_id, plan.capability, plan.risk, plan.summary.clone());
     let id = opened.id.clone();
     tokio::spawn(drive(
         state,
@@ -498,14 +498,14 @@ async fn drive(
 ) {
     let decided = tokio::time::timeout(APPROVAL_TIMEOUT, decision_rx).await;
     let (approval, result) = match decided {
-        Ok(Ok(Decision::Once)) => ("once", run_blocking(state.clone(), op).await),
+        Ok(Ok(Decision::Once)) => ("once", run_blocking(state.clone(), op, plan.risk).await),
         Ok(Ok(Decision::Grant)) => {
             if !plan.risk.always_needs_approval() {
                 state
                     .gate
                     .add_grant(&token_id, plan.capability, Instant::now());
             }
-            ("grant", run_blocking(state.clone(), op).await)
+            ("grant", run_blocking(state.clone(), op, plan.risk).await)
         }
         Ok(Ok(Decision::Deny)) | Ok(Err(_)) => (
             "deny",

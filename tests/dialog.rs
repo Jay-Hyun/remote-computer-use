@@ -182,3 +182,13 @@ fn prompt_answer_reaches_the_gate_and_cancels_when_answered_elsewhere() {
     assert_eq!(rx2.recv_timeout(Duration::from_secs(5)).unwrap(), "closed");
     assert_eq!(opened2.decision_rx.blocking_recv(), Ok(Decision::Deny));
 }
+
+#[test]
+fn zenity_text_cannot_gain_fake_lines_from_backslash_escapes() {
+    // zenity 가 --text 를 g_strcompress 하면 `\n` 이 줄바꿈이 된다. 우리는 백슬래시를 두 배로 넘긴다.
+    let p = prompt_for(&info(Risk::Read, "run /bin/x \\nread /tmp/x (read)"), 60);
+    let a = args(&build_command(Platform::Linux, &p));
+    let text = &a[a.iter().position(|x| x == "--text").unwrap() + 1];
+    assert!(text.contains("\\\\nread"), "{text:?}");
+    assert!(!text.contains("x \\nread"), "{text:?}");
+}

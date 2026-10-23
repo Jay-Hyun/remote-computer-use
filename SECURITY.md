@@ -26,6 +26,11 @@ A node lets another machine you own run a **narrow, allow-listed** set of comman
 
 ## Known limits (not vulnerabilities)
 
+- **Exec arguments are not checked against `fs.roots`/`deny`.** An allow-listed program can read or write anywhere its user can. Allow-list exact commands with narrow argument patterns; `rcu policy-check` warns about risky entries.
+- Installing the Claude Code plugin tracks the repository's default branch, not a release tag. The Codex skill and the binary are pinned to the release and checksummed.
+- Release assets carry a build-provenance attestation (`gh attestation verify <file> --repo Jay-Hyun/remote-computer-use`); the installer's SHA-256 check alone protects against corruption, not a compromised release.
+- A built-in deny list (shell startup files, `.ssh`, `.aws`, autostart locations) always applies, whatever the policy says.
+
 - Transport is HTTP over Tailscale's WireGuard tunnel. Use Tailscale ACLs to limit who can reach the node's port.
 - You decide what to allow-list. Allowing an interpreter or a program with an "execute" feature is equivalent to allowing a shell.
 - Approvals happen in the node's terminal; anyone with that terminal can approve.

@@ -47,8 +47,26 @@ pub fn launchd_plist(exe: &Path, rcu_home: Option<&Path>, log: &Path) -> String 
     )
 }
 
+/// systemd 는 `%h` 같은 지정자와 `$VAR` 를 풀어 쓰므로 `%`·`$` 도 이스케이프한다.
 fn systemd_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%")
+            .replace('$', "$$")
+    )
+}
+
+/// 줄바꿈이 든 경로는 유닛/설정 파일에 지시문을 끼워 넣을 수 있으므로 설치를 거부한다.
+fn check_path_text(label: &str, p: &Path) -> anyhow::Result<()> {
+    if p.to_string_lossy()
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c == '\0')
+    {
+        anyhow::bail!("{label} contains a newline or NUL; refusing to write a service file");
+    }
+    Ok(())
 }
 
 pub fn systemd_unit(exe: &Path, rcu_home: Option<&Path>) -> String {
@@ -62,7 +80,7 @@ pub fn systemd_unit(exe: &Path, rcu_home: Option<&Path>) -> String {
         .unwrap_or_default();
     format!(
         "[Unit]\nDescription=rcu node (remote-computer-use)\nAfter=network-online.target\n\n\
-[Service]\nExecStart={exe} serve\n{env}Restart=on-failure\nRestartSec=15\n\n\
+[Service]\nExecStart={exe} serve\n{env}Restart=on-failure\nRestartSec=15\nNoNewPrivileges=yes\n\n\
 [Install]\nWantedBy=default.target\n",
         exe = systemd_quote(&exe.to_string_lossy()),
     )
@@ -140,6 +158,10 @@ fn write_unit(path: &Path, text: &str) -> anyhow::Result<()> {
 
 pub fn install(start: bool) -> anyhow::Result<Outcome> {
     let exe = std::env::current_exe().context("cannot find the rcu executable")?;
+    check_path_text("the rcu executable path", &exe)?;
+    if let Some(home) = home_override() {
+        check_path_text("RCU_HOME", &home)?;
+    }
     let mut notes = Vec::new();
 
     #[cfg(target_os = "macos")]

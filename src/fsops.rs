@@ -1,10 +1,10 @@
 //! 파일 읽기·쓰기. 정책 검사 뒤 파일을 열고, 연 파일이 검사한 경로와 같은지 다시 확인한다
-//! (검사와 열기 사이에 링크가 바뀌는 경쟁을 막는다).
+//! (검사와 열기 사이에 링크가 바뀌는 경쟁을 막는다). 확인이 끝나기 전에는 파일을 건드리지 않는다.
 
 use crate::ops::OpError;
-use crate::policy::{Access, Policy, Risk};
+use crate::policy::{Access, Policy, ResolvedPath, Risk};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 pub struct ReadOut {
@@ -51,28 +51,56 @@ fn opened_path(_file: &File) -> Option<PathBuf> {
     None
 }
 
-/// 연 파일이 승인된 경로와 같은 파일인지. 확인 수단이 없는 OS(윈도우, M4 예정)에서는 통과시킨다.
+/// 연 파일이 승인된 경로와 같은 파일인지. 리눅스·맥에서 확인 수단이 없으면(예: /proc 없음) 거부한다.
+/// 확인 수단이 없는 OS(윈도우, M4 예정)에서만 통과시킨다.
 fn verify_opened(file: &File, expected: &Path) -> bool {
     match opened_path(file) {
         Some(actual) => actual == expected,
-        None => true,
+        None => !cfg!(any(target_os = "linux", target_os = "macos")),
     }
 }
 
+/// 마지막 구성요소가 링크면 실패하게 열고, FIFO 같은 특수 파일에서 멈추지 않게 한다.
 #[cfg(unix)]
-fn no_follow(opts: &mut OpenOptions) {
+fn safe_flags(opts: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
-    opts.custom_flags(libc::O_NOFOLLOW);
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
 }
 
 #[cfg(not(unix))]
-fn no_follow(_opts: &mut OpenOptions) {}
+fn safe_flags(_opts: &mut OpenOptions) {}
+
+/// 하드링크로 거부 패턴을 우회하는 것을 막는다: 링크가 둘 이상인 일반 파일은 건드리지 않는다.
+#[cfg(unix)]
+fn multiply_linked(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn multiply_linked(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// 일반 파일인지 먼저 확인한다(FIFO·장치 파일을 열다가 멈추는 것을 피한다).
+fn require_regular(path: &Path) -> Result<(), OpError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| io_err())?;
+    if !meta.is_file() {
+        return Err(OpError::new(
+            400,
+            "NOT_A_FILE",
+            "path is not a regular file",
+        ));
+    }
+    Ok(())
+}
 
 pub fn read(policy: &Policy, raw: &str) -> Result<ReadOut, OpError> {
     let resolved = policy.check_path(raw, Access::Read)?;
+    require_regular(&resolved.path)?;
     let mut opts = OpenOptions::new();
     opts.read(true);
-    no_follow(&mut opts);
+    safe_flags(&mut opts);
     let mut file = opts.open(&resolved.path).map_err(|_| io_err())?;
     if !verify_opened(&file, &resolved.path) {
         return Err(denied());
@@ -85,12 +113,11 @@ pub fn read(policy: &Policy, raw: &str) -> Result<ReadOut, OpError> {
             "path is not a regular file",
         ));
     }
+    if multiply_linked(&meta) {
+        return Err(denied());
+    }
     if meta.len() > policy.max_read_bytes {
-        return Err(OpError::new(
-            413,
-            "TOO_LARGE",
-            "file is larger than the node's read limit",
-        ));
+        return Err(too_large_read());
     }
     let mut data = Vec::new();
     (&mut file)
@@ -98,13 +125,17 @@ pub fn read(policy: &Policy, raw: &str) -> Result<ReadOut, OpError> {
         .read_to_end(&mut data)
         .map_err(|_| io_err())?;
     if data.len() as u64 > policy.max_read_bytes {
-        return Err(OpError::new(
-            413,
-            "TOO_LARGE",
-            "file is larger than the node's read limit",
-        ));
+        return Err(too_large_read());
     }
     Ok(ReadOut { data })
+}
+
+fn too_large_read() -> OpError {
+    OpError::new(
+        413,
+        "TOO_LARGE",
+        "file is larger than the node's read limit",
+    )
 }
 
 /// 쓰기 계획: 새 파일이면 write, 있는 파일을 덮어쓰면 destructive(항상 승인).
@@ -113,7 +144,7 @@ pub fn plan_write(
     raw: &str,
     len: usize,
     overwrite: bool,
-) -> Result<(crate::policy::ResolvedPath, Risk), OpError> {
+) -> Result<(ResolvedPath, Risk), OpError> {
     let resolved = policy.check_path(raw, Access::Write)?;
     if len as u64 > policy.max_write_bytes {
         return Err(OpError::new(
@@ -123,20 +154,9 @@ pub fn plan_write(
         ));
     }
     if resolved.existed {
-        let meta = std::fs::metadata(&resolved.path).map_err(|_| io_err())?;
-        if !meta.is_file() {
-            return Err(OpError::new(
-                400,
-                "NOT_A_FILE",
-                "path is not a regular file",
-            ));
-        }
+        require_regular(&resolved.path)?;
         if !overwrite {
-            return Err(OpError::new(
-                409,
-                "EXISTS",
-                "file exists; overwriting needs --overwrite and node approval",
-            ));
+            return Err(exists());
         }
         Ok((resolved, Risk::Destructive))
     } else {
@@ -144,10 +164,63 @@ pub fn plan_write(
     }
 }
 
-fn backup_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".rcu-bak");
-    PathBuf::from(name)
+fn exists() -> OpError {
+    OpError::new(
+        409,
+        "EXISTS",
+        "file exists; overwriting needs --overwrite and node approval",
+    )
+}
+
+fn backup_candidates(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    (0..100).map(move |n| {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(if n == 0 {
+            ".rcu-bak".to_string()
+        } else {
+            format!(".rcu-bak.{n}")
+        });
+        PathBuf::from(name)
+    })
+}
+
+/// 열려 있고 검증된 원본 내용을 새 백업 파일로 복사한다. 이미 있는 백업이나 링크는 건드리지 않고
+/// 다음 번호를 쓴다(`create_new` + `O_NOFOLLOW`).
+fn make_backup(original: &mut File, path: &Path, limit: u64) -> Result<String, OpError> {
+    let mut content = Vec::new();
+    original
+        .take(limit + 1)
+        .read_to_end(&mut content)
+        .map_err(|_| io_err())?;
+    if content.len() as u64 > limit {
+        return Err(OpError::new(
+            413,
+            "TOO_LARGE",
+            "file is too large to back up before overwriting",
+        ));
+    }
+    for candidate in backup_candidates(path) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        safe_flags(&mut opts);
+        match opts.open(&candidate) {
+            Ok(mut bak) => {
+                bak.write_all(&content).map_err(|_| io_err())?;
+                bak.sync_all().map_err(|_| io_err())?;
+                return Ok(candidate
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(io_err()),
+        }
+    }
+    Err(OpError::new(
+        409,
+        "EXISTS",
+        "too many backup files already exist next to the target",
+    ))
 }
 
 pub fn write(
@@ -159,37 +232,53 @@ pub fn write(
     let (resolved, risk) = plan_write(policy, raw, data.len(), overwrite)?;
     let overwrote = risk == Risk::Destructive;
 
-    let mut backup = None;
     let mut opts = OpenOptions::new();
     opts.write(true);
-    no_follow(&mut opts);
+    safe_flags(&mut opts);
     if overwrote {
-        let bak = backup_path(&resolved.path);
-        std::fs::copy(&resolved.path, &bak).map_err(|_| io_err())?;
-        backup = bak.file_name().map(|n| n.to_string_lossy().into_owned());
-        opts.truncate(true);
+        // 열기만 한다(자르지 않는다). 검증과 백업이 끝난 뒤에야 내용을 지운다.
+        opts.read(true);
     } else {
         opts.create_new(true);
     }
     let mut file = opts.open(&resolved.path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            OpError::new(
-                409,
-                "EXISTS",
-                "file exists; overwriting needs --overwrite and node approval",
-            )
+            exists()
         } else {
             io_err()
         }
     })?;
+
     if !verify_opened(&file, &resolved.path) {
-        // 방금 우리가 만든 파일이면 치운다. 덮어쓰기였다면 아직 아무것도 쓰지 않았다.
+        // 방금 우리가 만든 파일이면 치운다. 덮어쓰기에서는 아직 아무것도 건드리지 않았다.
         if !overwrote {
             if let Some(actual) = opened_path(&file) {
                 let _ = std::fs::remove_file(actual);
             }
         }
         return Err(denied());
+    }
+
+    let mut backup = None;
+    if overwrote {
+        let meta = file.metadata().map_err(|_| io_err())?;
+        if !meta.is_file() {
+            return Err(OpError::new(
+                400,
+                "NOT_A_FILE",
+                "path is not a regular file",
+            ));
+        }
+        if multiply_linked(&meta) {
+            return Err(denied());
+        }
+        backup = Some(make_backup(
+            &mut file,
+            &resolved.path,
+            policy.max_read_bytes.max(policy.max_write_bytes),
+        )?);
+        file.set_len(0).map_err(|_| io_err())?;
+        file.rewind().map_err(|_| io_err())?;
     }
     file.write_all(data).map_err(|_| io_err())?;
     file.sync_all().map_err(|_| io_err())?;

@@ -3,6 +3,7 @@
 use crate::policy::{Access, Policy, PolicyError, Risk};
 use crate::{exec, fsops};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,11 +61,24 @@ pub struct Plan {
     pub risk: Risk,
     /// 감사 로그용(가림 처리 전).
     pub target: String,
+    /// 승인 창에 그대로 보일 설명. 잘리지 않고, 보이지 않는 문자는 `\u{..}` 로 드러난다.
+    pub summary: String,
+}
+
+/// 승인 창에 보일 설명의 최대 길이. 넘으면 요청을 받지 않는다(앞부분만 보고 승인하는 일을 막는다).
+pub const MAX_SUMMARY_CHARS: usize = 600;
+
+fn too_long() -> OpError {
+    OpError::new(
+        413,
+        "TOO_LARGE",
+        "request is too long to show for approval; use shorter arguments or paths",
+    )
 }
 
 /// 정책 검사만 하고 실행하지 않는다. 위험도는 정책이 정한다.
 pub fn plan(policy: &Policy, op: &Op) -> Result<Plan, OpError> {
-    match op {
+    let plan = match op {
         Op::Exec { program, args } => {
             let risk = policy.check_command(program, args)?;
             let mut target = program.clone();
@@ -72,38 +86,54 @@ pub fn plan(policy: &Policy, op: &Op) -> Result<Plan, OpError> {
                 target.push(' ');
                 target.push_str(a);
             }
-            Ok(Plan {
+            Plan {
                 capability: "exec",
                 risk,
                 target,
-            })
+                summary: describe(op, None, None),
+            }
         }
         Op::Read { path } => {
-            policy.check_path(path, Access::Read)?;
-            Ok(Plan {
+            let resolved = policy.check_path(path, Access::Read)?;
+            Plan {
                 capability: "fs.read",
                 risk: Risk::Read,
                 target: path.clone(),
-            })
+                summary: describe(op, Some(&resolved.path), Some(Risk::Read)),
+            }
         }
         Op::Write {
             path,
             data,
             overwrite,
         } => {
-            let (_, risk) = fsops::plan_write(policy, path, data.len(), *overwrite)?;
-            Ok(Plan {
+            let (resolved, risk) = fsops::plan_write(policy, path, data.len(), *overwrite)?;
+            Plan {
                 capability: "fs.write",
                 risk,
                 target: path.clone(),
-            })
+                summary: describe(op, Some(&resolved.path), Some(risk)),
+            }
         }
+    };
+    if plan.summary.chars().count() > MAX_SUMMARY_CHARS {
+        return Err(too_long());
     }
+    Ok(plan)
 }
 
-/// 승인을 기다리는 동안 정책이 바뀌었을 수 있으므로 실행 직전에 다시 검사한다.
-pub fn execute(policy: &Policy, op: &Op) -> OpResult {
-    plan(policy, op)?;
+/// 승인을 기다리는 동안 상황이 바뀌었을 수 있으므로 실행 직전에 다시 검사한다.
+/// 다시 계산한 위험도가 승인받은 위험도보다 높으면(예: 승인 사이에 대상 파일이 생겨 "새 파일"이
+/// "덮어쓰기"가 됨) 실행하지 않는다.
+pub fn execute(policy: &Policy, op: &Op, approved: Risk) -> OpResult {
+    let now = plan(policy, op)?;
+    if now.risk.rank() > approved.rank() {
+        return Err(OpError::new(
+            409,
+            "STATE_CHANGED",
+            "the target changed while the request was waiting; send it again",
+        ));
+    }
     match op {
         Op::Exec { program, args } => {
             let out = exec::run(
@@ -140,40 +170,90 @@ pub fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// 승인 창에 보일 한 줄 설명. 제어 문자를 지워 터미널 조작을 막는다.
-pub fn summary(op: &Op) -> String {
-    let raw = match op {
-        Op::Exec { program, args } => {
-            let mut s = format!("run {program}");
-            for a in args {
-                s.push(' ');
-                s.push_str(a);
-            }
-            s
+/// 눈에 안 보이거나 줄 모양을 바꾸는 문자: 제어 문자, 방향 제어(bidi), 폭 없는 문자, 줄·문단 구분자, 태그 문자.
+fn is_invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}' | '\u{061C}' | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}')
+}
+
+/// 따옴표로 감싸고 `\`·`"`·보이지 않는 문자를 이스케이프해 인자 경계와 실제 내용이 그대로 보이게 한다.
+pub fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if is_invisible(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
         }
-        Op::Read { path } => format!("read {path}"),
+    }
+    out.push('"');
+    out
+}
+
+fn with_resolved(raw: &str, resolved: Option<&Path>) -> String {
+    match resolved {
+        Some(r) if r.to_string_lossy() != raw => {
+            format!("{} -> {}", quote(raw), quote(&r.to_string_lossy()))
+        }
+        _ => quote(raw),
+    }
+}
+
+fn describe(op: &Op, resolved: Option<&Path>, risk: Option<Risk>) -> String {
+    match op {
+        Op::Exec { program, args } => {
+            let list: Vec<String> = args.iter().map(|a| quote(a)).collect();
+            format!("run {} [{}]", quote(program), list.join(", "))
+        }
+        Op::Read { path } => format!("read {}", with_resolved(path, resolved)),
         Op::Write {
             path,
             data,
             overwrite,
         } => {
-            if *overwrite {
+            // 위험도를 아는 경우(계획 단계)에는 실제로 덮어쓰는지로 표시한다.
+            let overwriting = match risk {
+                Some(r) => r == Risk::Destructive,
+                None => *overwrite,
+            };
+            if overwriting {
                 format!(
-                    "OVERWRITE {path} ({} bytes, backup kept as .rcu-bak)",
+                    "OVERWRITE {} ({} bytes, old content kept in a .rcu-bak file)",
+                    with_resolved(path, resolved),
                     data.len()
                 )
             } else {
-                format!("create {path} ({} bytes)", data.len())
+                format!(
+                    "create {} ({} bytes)",
+                    with_resolved(path, resolved),
+                    data.len()
+                )
             }
         }
-    };
-    sanitize_for_display(&raw)
+    }
 }
 
+/// 요청만으로 만든 설명(해석된 경로 없이). 시험·실패 요청 기록용.
+pub fn summary(op: &Op) -> String {
+    describe(op, None, None)
+}
+
+/// 최후의 안전망: 남은 제어 문자를 지우고 길이를 줄인다(감사 로그 등 잘려도 되는 곳 전용).
 pub fn sanitize_for_display(text: &str) -> String {
     let mut out: String = text
         .chars()
-        .map(|c| if c.is_control() { '?' } else { c })
+        .map(|c| if is_invisible(c) { '?' } else { c })
         .take(300)
         .collect();
     if text.chars().count() > 300 {

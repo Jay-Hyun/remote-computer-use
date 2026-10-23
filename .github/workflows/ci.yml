@@ -22,6 +22,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: rustup toolchain install stable --profile minimal -c clippy -c rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
@@ -32,6 +34,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: rustup toolchain install stable --profile minimal -c clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked --test bind --test pairing --test tokens_audit --test units_m2 --test dialog --test proxy --test service
@@ -40,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: shellcheck
         run: shellcheck install.sh scripts/install-codex-skill.sh
       - name: plugin manifests are valid JSON
@@ -47,3 +53,8 @@ jobs:
           for f in .claude-plugin/marketplace.json plugin/.claude-plugin/plugin.json proto/*.json; do
             python3 -m json.tool "$f" > /dev/null
           done
+      - name: plugin.json version matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          plugin=$(python3 -c 'import json;print(json.load(open("plugin/.claude-plugin/plugin.json"))["version"])')
+          test "$version" = "$plugin"

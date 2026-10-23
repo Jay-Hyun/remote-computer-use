@@ -1,6 +1,6 @@
 //! 노드 정책. 기본은 거부이고, 정책 파일에 적힌 것만 허용한다.
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -24,6 +24,16 @@ impl Risk {
     }
 
     /// 그랜트가 있어도 매번 노드 쪽 승인이 필요한 위험도.
+    /// 위험도 순서: 승인받은 것보다 높은 위험도로 바뀐 요청은 실행하지 않는다.
+    pub fn rank(self) -> u8 {
+        match self {
+            Risk::Read => 0,
+            Risk::Write => 1,
+            Risk::Destructive => 2,
+            Risk::External => 3,
+        }
+    }
+
     pub fn always_needs_approval(self) -> bool {
         matches!(self, Risk::Destructive | Risk::External)
     }
@@ -221,6 +231,7 @@ pub struct Policy {
     pub approval_ui: ApprovalUi,
     roots: Vec<PathBuf>,
     deny: GlobSet,
+    protected: Vec<PathBuf>,
     exec_allow: Vec<ExecAllow>,
 }
 
@@ -242,18 +253,61 @@ const SHELLS: &[&str] = &[
     "wscript",
     "cscript",
     "mshta",
+    "busybox",
+    "toybox",
+    "rbash",
+    "mksh",
+    "tclsh",
+    "expect",
+    "wsl",
+    "rundll32",
+    "msiexec",
 ];
 
 /// 다른 프로그램을 대신 실행해 허용 목록을 우회할 수 있는 래퍼.
 const WRAPPERS: &[&str] = &[
-    "env", "xargs", "sudo", "doas", "su", "runas", "nohup", "nice", "start",
+    "env", "xargs", "sudo", "doas", "su", "runas", "nohup", "nice", "start", "timeout", "time",
+    "stdbuf", "setsid", "chroot", "nsenter", "unshare", "flock", "watch", "script", "strace",
+    "ltrace", "gdb", "ionice", "taskset", "command", "exec",
+];
+
+/// 허용 목록에 `*`/`**` 인자와 함께 넣으면 사실상 셸이 되는 프로그램(막지는 않고 경고한다).
+const INTERPRETER_PREFIXES: &[&str] = &[
+    "python", "perl", "ruby", "node", "php", "lua", "awk", "gawk", "find", "tar", "less", "vi",
+    "vim", "nano", "ssh", "scp", "rsync", "git", "make", "npm", "pip", "cargo",
+];
+
+/// 정책 파일에 없어도 항상 거부하는 위치: 비밀 파일과 로그인 때 자동 실행되는 파일.
+/// 허용 루트가 홈 전체여도 여기에는 읽기·쓰기 모두 막힌다.
+const BUILTIN_DENY: &[&str] = &[
+    "**/.ssh/**",
+    "**/.gnupg/**",
+    "**/.aws/**",
+    "**/.env",
+    "**/.netrc",
+    "**/.bashrc",
+    "**/.bash_profile",
+    "**/.bash_login",
+    "**/.profile",
+    "**/.zshrc",
+    "**/.zshenv",
+    "**/.zprofile",
+    "**/.zlogin",
+    "**/.config/autostart/**",
+    "**/.config/systemd/**",
+    "**/Library/LaunchAgents/**",
+    "**/Library/LaunchDaemons/**",
+    "**/Start Menu/**",
+    "**/Startup/**",
 ];
 
 fn base_name(program: &str) -> String {
+    // 윈도우는 끝의 점·공백을 무시하므로 `cmd.exe.` 도 cmd.exe 로 본다.
     let name = program
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(program)
+        .trim_end_matches(['.', ' '])
         .to_ascii_lowercase();
     for ext in [".exe", ".com", ".bat", ".cmd"] {
         if let Some(stem) = name.strip_suffix(ext) {
@@ -269,7 +323,10 @@ fn base_name(program: &str) -> String {
 
 pub fn is_shell(program: &str) -> bool {
     let name = base_name(program);
-    name.ends_with(".bat") || name.ends_with(".cmd") || SHELLS.contains(&name.as_str())
+    name.ends_with(".bat")
+        || name.ends_with(".cmd")
+        || name.ends_with(".ps1")
+        || SHELLS.contains(&name.as_str())
 }
 
 fn is_wrapper(program: &str) -> bool {
@@ -277,7 +334,32 @@ fn is_wrapper(program: &str) -> bool {
 }
 
 fn is_absolute_program(program: &str) -> bool {
-    Path::new(program).is_absolute() || (program.len() > 2 && program.as_bytes()[1] == b':')
+    let b = program.as_bytes();
+    // 윈도우 드라이브(`C:\`, `C:/`)와 UNC(`\\서버\`)는 윈도우에서만 절대 경로로 본다.
+    let windows_form = cfg!(windows)
+        && ((b.len() > 2
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'\\' || b[2] == b'/'))
+            || program.starts_with("\\\\"));
+    Path::new(program).is_absolute() || windows_form
+}
+
+/// 읽기·쓰기 크기 상한의 상한(메모리에 통째로 올리므로).
+const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `/a/link/secret/**` 처럼 글롭 문자가 나오기 전까지의 앞부분을 실제 경로로 바꾼 패턴. 같으면 None.
+fn canonical_prefix_variant(pat: &str) -> Option<String> {
+    let cut = pat.find(['*', '?', '[', '{']).unwrap_or(pat.len());
+    let prefix = &pat[..cut];
+    let dir_end = prefix.rfind('/')?;
+    let (dir, rest) = (&pat[..dir_end], &pat[dir_end..]);
+    if dir.is_empty() {
+        return None;
+    }
+    let real = std::fs::canonicalize(dir).ok()?;
+    let real = real.to_string_lossy().replace('\\', "/");
+    (real != dir).then(|| format!("{real}{rest}"))
 }
 
 fn expand_home(s: &str) -> String {
@@ -339,9 +421,31 @@ impl Policy {
         }
 
         let mut builder = GlobSetBuilder::new();
+        let mut add_glob = |pat: &str| -> anyhow::Result<()> {
+            // 대소문자 구분 없이: 맥·윈도우의 기본 파일 시스템은 `.ENV` 와 `.env` 를 같은 파일로 본다.
+            builder.add(GlobBuilder::new(pat).case_insensitive(true).build()?);
+            Ok(())
+        };
+        for pat in BUILTIN_DENY {
+            add_glob(pat)?;
+        }
         for pat in &raw.fs.deny {
             let pat = expand_home(pat).replace('\\', "/");
-            builder.add(Glob::new(&pat)?);
+            if pat.starts_with('~') {
+                anyhow::bail!("fs.deny: cannot expand ~ in \"{pat}\"");
+            }
+            let absolute = pat.starts_with('/')
+                || pat.starts_with("**")
+                || pat.starts_with('*')
+                || (pat.len() > 2 && pat.as_bytes()[1] == b':');
+            if !absolute {
+                anyhow::bail!("fs.deny: pattern \"{pat}\" must be absolute or start with **/ (relative patterns never match)");
+            }
+            add_glob(&pat)?;
+            // 패턴 앞부분이 심볼릭 링크를 거치면 실제 경로로도 한 번 더 건다.
+            if let Some(real) = canonical_prefix_variant(&pat) {
+                add_glob(&real)?;
+            }
         }
 
         let roots = raw
@@ -363,8 +467,8 @@ impl Policy {
             exec_enabled: raw.capabilities.exec,
             fs_read_enabled: raw.capabilities.fs_read,
             fs_write_enabled: raw.capabilities.fs_write,
-            max_read_bytes: raw.fs.max_read_bytes,
-            max_write_bytes: raw.fs.max_write_bytes,
+            max_read_bytes: raw.fs.max_read_bytes.min(MAX_FILE_BYTES),
+            max_write_bytes: raw.fs.max_write_bytes.min(MAX_FILE_BYTES),
             exec_timeout_secs: raw.exec.timeout_secs.clamp(1, 600),
             exec_max_output_bytes: raw.exec.max_output_bytes.clamp(1024, 4 * 1024 * 1024),
             rate_per_minute: raw.limits.per_minute.max(1),
@@ -379,6 +483,7 @@ impl Policy {
             },
             roots,
             deny: builder.build()?,
+            protected: Vec::new(),
             exec_allow,
         })
     }
@@ -396,6 +501,54 @@ impl Policy {
             caps.push("fs.write");
         }
         caps
+    }
+
+    /// 노드 자신의 설정·상태 위치(정책, 토큰 해시, 감사 로그, 페어링 파일)는 허용 루트가 덮고 있어도
+    /// 파일 능력으로 건드릴 수 없게 한다.
+    pub fn protect(&mut self, path: PathBuf) {
+        self.protected.push(path);
+    }
+
+    /// 정책 파일을 읽은 사람이 놓치기 쉬운 위험 설정. 막지는 않고 알려 준다.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let roots: Vec<PathBuf> = self
+            .roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+        for entry in &self.exec_allow {
+            let name = base_name(&entry.program);
+            let open_args = entry.args.iter().any(|a| a == "*" || a == "**");
+            if open_args && INTERPRETER_PREFIXES.iter().any(|p| name.starts_with(p)) {
+                out.push(format!(
+                    "exec.allow {}: `*`/`**` arguments on a program that can run other programs or touch any file make it as powerful as a shell; narrow the args",
+                    entry.program
+                ));
+            }
+            if let Ok(real) = std::fs::canonicalize(&entry.program) {
+                if roots.iter().any(|root| real.starts_with(root)) {
+                    out.push(format!(
+                        "exec.allow {}: the program lives inside fs.roots, so file write approval could replace it",
+                        entry.program
+                    ));
+                }
+            }
+        }
+        if !self.exec_allow.is_empty() {
+            out.push(
+                "exec arguments are not checked against fs.roots/deny: an allowed program can read or write anywhere its user can".to_string(),
+            );
+        }
+        for root in &roots {
+            if root.parent().is_none() {
+                out.push(format!(
+                    "fs.roots contains the filesystem root ({})",
+                    root.display()
+                ));
+            }
+        }
+        out
     }
 
     pub fn check_command(&self, program: &str, args: &[String]) -> Result<Risk, PolicyError> {
@@ -464,7 +617,16 @@ impl Policy {
         }
 
         let normalized = resolved.to_string_lossy().replace('\\', "/");
-        if self.deny.is_match(normalized.as_str()) {
+        // 윈도우의 `\\?\` 접두어는 패턴 비교 전에 뗀다.
+        let normalized = normalized.strip_prefix("//?/").unwrap_or(&normalized);
+        if self.deny.is_match(normalized) {
+            return Err(denied());
+        }
+        if self.protected.iter().any(|p| {
+            std::fs::canonicalize(p)
+                .map(|p| resolved.starts_with(&p))
+                .unwrap_or(false)
+        }) {
             return Err(denied());
         }
 

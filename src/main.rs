@@ -248,7 +248,13 @@ fn serve(bind: Option<String>, policy: Option<PathBuf>) -> anyhow::Result<()> {
         Some(p) => p,
         None => config::policy_path()?,
     };
-    let policy = Policy::load(&policy_path).context("policy file is invalid")?;
+    let mut policy = Policy::load(&policy_path).context("policy file is invalid")?;
+    // 노드 자신의 설정·상태(정책, 토큰 해시, 감사 로그, 페어링 파일)는 파일 능력으로 건드릴 수 없다.
+    policy.protect(config::home_dir()?);
+    policy.protect(policy_path.clone());
+    for warning in policy.warnings() {
+        eprintln!("policy warning: {warning}");
+    }
     let audit = Audit::new(config::audit_dir()?);
     let removed = audit.prune(time::OffsetDateTime::now_utc().date(), RETENTION_DAYS)?;
     if removed > 0 {
@@ -401,7 +407,12 @@ fn policy_check(path: Option<PathBuf>) -> anyhow::Result<()> {
         None => config::policy_path()?,
     };
     let policy = Policy::load(&path).context("policy file is invalid")?;
-    print(json!({ "ok": true, "name": policy.node_name, "capabilities": policy.capabilities() }));
+    print(json!({
+        "ok": true,
+        "name": policy.node_name,
+        "capabilities": policy.capabilities(),
+        "warnings": policy.warnings(),
+    }));
     Ok(())
 }
 

@@ -183,3 +183,14 @@ impl Drop for KillOnDrop {
         let _ = self.0.wait();
     }
 }
+
+#[test]
+fn systemd_unit_escapes_specifiers_and_expansion() {
+    let unit = systemd_unit(Path::new("/opt/100%/$HOME/rcu"), Some(Path::new("/h/%h")));
+    assert!(
+        unit.contains("ExecStart=\"/opt/100%%/$$HOME/rcu\" serve"),
+        "{unit}"
+    );
+    assert!(unit.contains("Environment=\"RCU_HOME=/h/%%h\""), "{unit}");
+    assert!(unit.contains("NoNewPrivileges=yes"));
+}

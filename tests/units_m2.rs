@@ -112,7 +112,7 @@ fn overwrite_summary_says_overwrite() {
         data: vec![1, 2, 3],
         overwrite: true,
     };
-    assert!(summary(&op).starts_with("OVERWRITE /w/f"));
+    assert!(summary(&op).starts_with("OVERWRITE \"/w/f\""));
 }
 
 #[test]

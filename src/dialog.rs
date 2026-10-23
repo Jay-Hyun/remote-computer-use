@@ -128,6 +128,9 @@ pub fn build_command(platform: Platform, p: &Prompt) -> Command {
             cmd
         }
         Platform::Linux => {
+            // zenity 는 --text 에 g_strcompress 를 적용해 `\n` 을 줄바꿈으로 바꾼다. 백슬래시를 두 배로 해서
+            // 요청 속 `\n` 이 가짜 줄을 만들지 못하게 한다.
+            let body = p.body.replace('\\', "\\\\");
             let mut cmd = Command::new("zenity");
             cmd.args([
                 "--question",
@@ -137,7 +140,7 @@ pub fn build_command(platform: Platform, p: &Prompt) -> Command {
                 "--title",
                 &p.title,
                 "--text",
-                &p.body,
+                &body,
                 "--ok-label",
                 once_label(),
                 "--cancel-label",
